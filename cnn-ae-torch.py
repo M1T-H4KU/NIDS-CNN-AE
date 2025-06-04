@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import os
+import time # For time recording
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,8 +9,18 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split # if needed for a validation split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
+# from sklearn.model_selection import train_test_split # Not strictly needed by current flow but good for general use
+
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report # classification_report is key
+import matplotlib.pyplot as plt # For generating table image
+
+def format_time(seconds):
+    """Helper function to format seconds into H:M:S string"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
 
 # --- 0. Configuration & Device Setup ---
 # These should be adjusted based on your actual NSL-KDD preprocessing
@@ -31,6 +42,9 @@ CNN_BATCH_SIZE = 64
 # Device configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
+
+EXTRACTED_FEATURES_FILE = "ae_extracted_features.pt" # .pt for PyTorch tensors
+
 
 # --- 1. NSL-KDD Data Loading and Preprocessing ---
 # (This part is largely the same, just ensure output is suitable for PyTorch tensors)
@@ -275,8 +289,7 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate=1e-3
         criterion = nn.CrossEntropyLoss()
         
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    target_names_binary = ['normal (0)', 'abnormal (1)'] # For classification_report
+    target_names = ['Normal (Class 0)', 'Abnormal (Class 1)'] # For classification_report
 
     print("\n--- Training CNN Classifier ---")
     for epoch in range(epochs):
@@ -287,19 +300,16 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate=1e-3
         
         for batch_features, batch_labels in train_loader:
             batch_features, batch_labels = batch_features.to(DEVICE), batch_labels.to(DEVICE)
-            
             optimizer.zero_grad()
             outputs = model(batch_features)
             loss = criterion(outputs, batch_labels)
             loss.backward()
             optimizer.step()
-            
             train_loss += loss.item()
             if num_classes == 1:
                 predicted = (torch.sigmoid(outputs) > 0.5).float()
             else:
                 _, predicted = torch.max(outputs.data, 1)
-            
             total_train += batch_labels.size(0)
             correct_train += (predicted == batch_labels).sum().item()
             
@@ -309,8 +319,8 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate=1e-3
         # Validation
         model.eval()
         val_loss = 0
-        all_val_preds = []
-        all_val_labels = []
+        all_val_preds_list = []
+        all_val_labels_list = []
         
         with torch.no_grad():
             for batch_features, batch_labels in val_loader:
@@ -318,139 +328,295 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate=1e-3
                 outputs = model(batch_features)
                 loss = criterion(outputs, batch_labels)
                 val_loss += loss.item()
-                
                 if num_classes == 1:
                     predicted_val = (torch.sigmoid(outputs) > 0.5).float()
                 else:
                     _, predicted_val = torch.max(outputs.data, 1)
-                
-                all_val_preds.extend(predicted_val.cpu().numpy())
-                all_val_labels.extend(batch_labels.cpu().numpy())
+                all_val_preds_list.extend(predicted_val.cpu().numpy())
+                all_val_labels_list.extend(batch_labels.cpu().numpy())
 
         avg_val_loss = val_loss / len(val_loader)
-        
-        all_val_labels_np = np.array(all_val_labels).squeeze()
-        all_val_preds_np = np.array(all_val_preds).squeeze()
+        all_val_labels_np = np.array(all_val_labels_list).squeeze()
+        all_val_preds_np = np.array(all_val_preds_list).squeeze()
 
-        # Overall accuracy (still useful)
-        val_overall_accuracy = accuracy_score(all_val_labels_np, all_val_preds_np) * 100
+        # Use classification_report for detailed metrics
+        # output_dict=True makes it easy to parse
+        # zero_division=0 will return 0.0 for precision/recall/F1 if division by zero occurs
+        report_dict = classification_report(all_val_labels_np, all_val_preds_np, 
+                                            target_names=target_names, output_dict=True, zero_division=0)
         
-        # Classification report for per-class metrics
-        # For binary classification (positive class is 1 by default in precision/recall/f1, report shows both)
-        # zero_division=0 will return 0 if there are no positive predictions/labels
-        report_val = classification_report(all_val_labels_np, all_val_preds_np, 
-                                           target_names=target_names_binary, zero_division=0, digits=4)
-        
+        val_accuracy = report_dict['accuracy'] * 100 # Overall accuracy from the report
+
         if (epoch + 1) % 5 == 0 or epoch == 0 or epoch == epochs -1 :
             print(f"Epoch [{epoch+1}/{epochs}]:")
             print(f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy_epoch:.2f}%")
-            print(f"  Val Loss  : {avg_val_loss:.4f}, Val Overall Acc: {val_overall_accuracy:.2f}%")
-            print(f"  Validation Classification Report:\n{report_val}")
-            # The 'recall' for 'normal (0)' is your "Accuracy on normal case"
-            # The 'recall' for 'abnormal (1)' is your "Accuracy on abnormal case"
-
+            print(f"  Val Loss  : {avg_val_loss:.4f}, Val Acc: {val_accuracy:.2f}%")
+            for class_name in target_names:
+                if class_name in report_dict:
+                    print(f"  {class_name}: "
+                          f"P: {report_dict[class_name]['precision']*100:.2f}%, "
+                          f"R: {report_dict[class_name]['recall']*100:.2f}%, "
+                          f"F1: {report_dict[class_name]['f1-score']*100:.2f}%")
     print("CNN training finished.")
     return model
 
+def save_results_table(metrics_data, timings_data, output_path="results_summary.png"):
+    """
+    Generates and saves a table image of the classification metrics and step timings.
+    """
+    # Prepare data for the metrics table
+    metric_labels = ['Overall Accuracy', 
+                     'Normal - Precision', 'Normal - Recall', 'Normal - F1-Score', 'Normal - Support',
+                     'Abnormal - Precision', 'Abnormal - Recall', 'Abnormal - F1-Score', 'Abnormal - Support',
+                     'Macro Avg - Precision', 'Macro Avg - Recall', 'Macro Avg - F1-Score',
+                     'Weighted Avg - Precision', 'Weighted Avg - Recall', 'Weighted Avg - F1-Score']
+    
+    metric_values = [
+        f"{metrics_data.get('accuracy', 0)*100:.2f}%",
+        f"{metrics_data.get('Normal (Class 0)', {}).get('recall', 0)*100:.2f}%",
+        f"{metrics_data.get('Normal (Class 0)', {}).get('precision', 0)*100:.2f}%",
+        f"{metrics_data.get('Normal (Class 0)', {}).get('f1-score', 0)*100:.2f}%",
+        f"{metrics_data.get('Normal (Class 0)', {}).get('support', 0)}",
+        f"{metrics_data.get('Abnormal (Class 1)', {}).get('recall', 0)*100:.2f}%",
+        f"{metrics_data.get('Abnormal (Class 1)', {}).get('precision', 0)*100:.2f}%",
+        f"{metrics_data.get('Abnormal (Class 1)', {}).get('f1-score', 0)*100:.2f}%",
+        f"{metrics_data.get('Abnormal (Class 1)', {}).get('support', 0)}",
+        f"{metrics_data.get('macro avg', {}).get('precision', 0)*100:.2f}%",
+        f"{metrics_data.get('macro avg', {}).get('recall', 0)*100:.2f}%",
+        f"{metrics_data.get('macro avg', {}).get('f1-score', 0)*100:.2f}%",
+        f"{metrics_data.get('weighted avg', {}).get('precision', 0)*100:.2f}%",
+        f"{metrics_data.get('weighted avg', {}).get('recall', 0)*100:.2f}%",
+        f"{metrics_data.get('weighted avg', {}).get('f1-score', 0)*100:.2f}%"
+    ]
+    
+    metrics_table_data = [[label, value] for label, value in zip(metric_labels, metric_values)]
+
+    # Prepare data for the timings table
+    timings_table_data = [[step, duration_str] for step, duration_str in timings_data.items()]
+
+    # Create figure and axes
+    # Adjust subplot counts and figure size based on how many tables you want
+    fig, axs = plt.subplots(2, 1, figsize=(10, 8)) # 2 rows, 1 column
+
+    # --- Metrics Table ---
+    axs[0].axis('tight')
+    axs[0].axis('off')
+    axs[0].set_title("Final Classification Metrics", fontsize=14, loc='center', pad=20)
+    metrics_mpl_table = axs[0].table(cellText=metrics_table_data,
+                                     colLabels=["Metric", "Value"],
+                                     loc='center',
+                                     cellLoc='left',
+                                     colWidths=[0.6, 0.3]) # Adjust colWidths as needed
+    metrics_mpl_table.auto_set_font_size(False)
+    metrics_mpl_table.set_fontsize(10)
+    metrics_mpl_table.scale(1.1, 1.1) # Adjust scale for better fit
+
+    plt.tight_layout(pad=3.0) # Add padding between subplots and title
+    try:
+        plt.savefig(output_path, bbox_inches='tight', dpi=200)
+        print(f"Results table saved to {output_path}")
+    except Exception as e:
+        print(f"Error saving results table: {e}")
+    plt.close(fig)
+    
+
 # --- 6. Main Workflow ---
 if __name__ == '__main__':
-    # Step 1: Load and preprocess data
+    step_timings = {} # Dictionary to store timings
+
+    # --- Step 1: Load and preprocess data (This always runs) ---
+    print("\n--- Starting: Data Loading & Preprocessing ---")
+    start_time_data_load = time.time() # Renamed start_time for clarity
     X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor = load_and_preprocess_nsl_kdd()
+    # NUM_FEATURES_PREPROCESSED is set globally by load_and_preprocess_nsl_kdd
+    duration_data_load = time.time() - start_time_data_load
+    step_timings['Data Loading & Preprocessing'] = format_time(duration_data_load)
+    print(f"--- Finished: Data Loading & Preprocessing in {format_time(duration_data_load)} ---")
 
-    # Create datasets and dataloaders for AE (only needs features for reconstruction)
-    ae_train_dataset = NSLKDDDataset(X_train_tensor) # Labels are not used for AE input/output comparison
-    ae_train_loader = DataLoader(ae_train_dataset, batch_size=AE_BATCH_SIZE, shuffle=True)
-    # For feature extraction, also prepare test data loader
-    ae_test_dataset_for_extraction = NSLKDDDataset(X_test_tensor)
-    ae_test_loader_for_extraction = DataLoader(ae_test_dataset_for_extraction, batch_size=AE_BATCH_SIZE, shuffle=False)
+    # --- Step 2: Autoencoder Training and/or Feature Loading/Extraction ---
+    X_train_features_ae = None
+    X_test_features_ae = None
+    actual_latent_dim_for_cnn = LATENT_DIM # Default to global config
 
+    if os.path.exists(EXTRACTED_FEATURES_FILE):
+        print(f"\n--- Loading pre-extracted AE features from {EXTRACTED_FEATURES_FILE} ---")
+        start_time_load_feat = time.time()
+        try:
+            loaded_data = torch.load(EXTRACTED_FEATURES_FILE, map_location=DEVICE) # Load to current device
+            X_train_features_ae = loaded_data['train_features'].to(DEVICE)
+            X_test_features_ae = loaded_data['test_features'].to(DEVICE)
+            # Retrieve dimensions used when features were saved for consistency
+            # num_original_features_saved = loaded_data.get('num_original_features', NUM_FEATURES_PREPROCESSED)
+            actual_latent_dim_for_cnn = loaded_data.get('latent_dim', X_train_features_ae.shape[1])
+            
+            # Optional: Sanity check if loaded dimensions match current config or data
+            # if num_original_features_saved != NUM_FEATURES_PREPROCESSED:
+            #     print(f"Warning: Loaded features were based on {num_original_features_saved} original features, current is {NUM_FEATURES_PREPROCESSED}")
+            if actual_latent_dim_for_cnn != LATENT_DIM:
+                 print(f"Warning: Loaded features have latent_dim {actual_latent_dim_for_cnn}, global LATENT_DIM is {LATENT_DIM}. Using {actual_latent_dim_for_cnn} for CNN.")
 
-    # Step 2.1: Build and Train Autoencoder
-    autoencoder_model = Autoencoder(
-        input_dim=NUM_FEATURES_PREPROCESSED,
-        latent_dim=LATENT_DIM,
-        hidden_dim_1=AE_HIDDEN_DIM_1
-    )
-    print("\n--- Autoencoder Architecture ---")
-    print(autoencoder_model) # PyTorch way to see layers
+            duration_load_feat = time.time() - start_time_load_feat
+            step_timings['AE Feature Loading'] = format_time(duration_load_feat)
+            print(f"--- Finished: AE Feature Loading in {format_time(duration_load_feat)} ---")
+            print(f"Loaded AE features. Train shape: {X_train_features_ae.shape}, Test shape: {X_test_features_ae.shape}")
+            
+            # If features are loaded, we skip AE training and direct extraction.
+            step_timings['Autoencoder Training'] = "Skipped (loaded features)"
+            step_timings['AE Feature Extraction'] = "Skipped (loaded features)"
+        except Exception as e:
+            print(f"Error loading features from {EXTRACTED_FEATURES_FILE}: {e}. Will proceed to train AE and extract features.")
+            X_train_features_ae = None # Ensure it's None so the else block runs
+
+    if X_train_features_ae is None or X_test_features_ae is None: # If loading failed or file didn't exist
+        # --- Step 2.1: Build and Train Autoencoder (if features not loaded) ---
+        print("\n--- Starting: Autoencoder Training ---")
+        start_time_ae_train = time.time()
+        autoencoder_model = Autoencoder(
+            input_dim=NUM_FEATURES_PREPROCESSED, 
+            latent_dim=LATENT_DIM, # Use global LATENT_DIM for AE definition
+            hidden_dim_1=AE_HIDDEN_DIM_1
+        ).to(DEVICE) # Move model to device
+        print("\n--- Autoencoder Architecture ---")
+        print(autoencoder_model)
+        
+        ae_train_dataset = NSLKDDDataset(X_train_tensor)
+        ae_train_loader = DataLoader(ae_train_dataset, batch_size=AE_BATCH_SIZE, shuffle=True)
+        train_autoencoder(autoencoder_model, ae_train_loader, epochs=AE_EPOCHS)
+        duration_ae_train = time.time() - start_time_ae_train
+        step_timings['Autoencoder Training'] = format_time(duration_ae_train)
+        print(f"--- Finished: Autoencoder Training in {format_time(duration_ae_train)} ---")
+
+        # --- Step 2.2: Extract Features using the trained Encoder part of the AE ---
+        print("\n--- Starting: AE Feature Extraction ---")
+        start_time_extract_feat = time.time()
+        ae_train_dataset_for_extraction = NSLKDDDataset(X_train_tensor)
+        ae_train_loader_for_extraction = DataLoader(ae_train_dataset_for_extraction, batch_size=AE_BATCH_SIZE, shuffle=False)
+        ae_test_dataset_for_extraction = NSLKDDDataset(X_test_tensor)
+        ae_test_loader_for_extraction = DataLoader(ae_test_dataset_for_extraction, batch_size=AE_BATCH_SIZE, shuffle=False)
+
+        X_train_features_ae = extract_ae_features(autoencoder_model, ae_train_loader_for_extraction)
+        X_test_features_ae = extract_ae_features(autoencoder_model, ae_test_loader_for_extraction)
+        actual_latent_dim_for_cnn = X_train_features_ae.shape[1] # Set from actual extracted features
+        
+        duration_extract_feat = time.time() - start_time_extract_feat
+        step_timings['AE Feature Extraction'] = format_time(duration_extract_feat)
+        print(f"--- Finished: AE Feature Extraction in {format_time(duration_extract_feat)} ---")
+
+        # Save the extracted features
+        print(f"\n--- Saving AE features to {EXTRACTED_FEATURES_FILE} ---")
+        try:
+            torch.save({
+                'train_features': X_train_features_ae.cpu(), # Save as CPU tensors
+                'test_features': X_test_features_ae.cpu(),  # Save as CPU tensors
+                'num_original_features': NUM_FEATURES_PREPROCESSED,
+                'latent_dim': actual_latent_dim_for_cnn 
+            }, EXTRACTED_FEATURES_FILE)
+            print(f"--- Features saved. ---")
+        except Exception as e:
+            print(f"Error saving features to {EXTRACTED_FEATURES_FILE}: {e}")
     
-    train_autoencoder(autoencoder_model, ae_train_loader, epochs=AE_EPOCHS)
+    # Ensure features are on the correct device for CNN training
+    if X_train_features_ae is not None:
+        X_train_features_ae = X_train_features_ae.to(DEVICE)
+    if X_test_features_ae is not None:
+        X_test_features_ae = X_test_features_ae.to(DEVICE)
 
-    # Step 2.2: Extract Features using the trained Encoder part of the AE
-    print("\nExtracting features using the trained Autoencoder's Encoder part...")
-    # For X_train_features_ae
-    ae_train_dataset_for_extraction = NSLKDDDataset(X_train_tensor) # Recreate if needed or reuse
-    ae_train_loader_for_extraction = DataLoader(ae_train_dataset_for_extraction, batch_size=AE_BATCH_SIZE, shuffle=False)
+    if X_train_features_ae is None or X_test_features_ae is None:
+        print("Critical Error: AE features are not available. Exiting.")
+        exit()
+        
+    print(f"AE features ready for CNN. Train shape: {X_train_features_ae.shape}, Test shape: {X_test_features_ae.shape}")
+    print(f"Using latent dimension for CNN: {actual_latent_dim_for_cnn}")
 
-    X_train_features_ae = extract_ae_features(autoencoder_model, ae_train_loader_for_extraction)
-    X_test_features_ae = extract_ae_features(autoencoder_model, ae_test_loader_for_extraction)
-    
-    print(f"Shape of original training data: {X_train_tensor.shape}")
-    print(f"Shape of AE-extracted training features: {X_train_features_ae.shape}")
-    print(f"Shape of original test data: {X_test_tensor.shape}")
-    print(f"Shape of AE-extracted test features: {X_test_features_ae.shape}")
 
-    # Step 3: Train CNN Classifier with AE features
-    # Create datasets and dataloaders for CNN
-    cnn_train_dataset = NSLKDDDataset(X_train_features_ae, y_train_tensor)
+    # --- Step 3: Train CNN Classifier with AE features ---
+    cnn_train_dataset = NSLKDDDataset(X_train_features_ae, y_train_tensor) # y_train_tensor from data loading
     cnn_train_loader = DataLoader(cnn_train_dataset, batch_size=CNN_BATCH_SIZE, shuffle=True)
-    
-    cnn_test_dataset = NSLKDDDataset(X_test_features_ae, y_test_tensor)
-    cnn_test_loader = DataLoader(cnn_test_dataset, batch_size=CNN_BATCH_SIZE, shuffle=False)
+    cnn_test_loader = DataLoader(NSLKDDDataset(X_test_features_ae, y_test_tensor), batch_size=CNN_BATCH_SIZE, shuffle=False)
 
-    # Build CNN model
     num_classes_for_cnn = 1 # Binary classification
-    cnn_classifier_model = CNNClassifier(input_dim_cnn=LATENT_DIM, num_classes=num_classes_for_cnn)
+    cnn_classifier_model = CNNClassifier(
+        input_dim_cnn=actual_latent_dim_for_cnn, # Use the actual latent dim
+        num_classes=num_classes_for_cnn
+    ).to(DEVICE) # Move model to device
+    
     print("\n--- CNN Classifier Architecture ---")
-    print(cnn_classifier_model)
+    print(cnn_classifier_model) # Will reflect actual_latent_dim_for_cnn in its flattened layer calculation
 
-    # Train CNN
+    print("\n--- Starting: CNN Classifier Training & Validation ---")
+    start_time_cnn_train = time.time()
     trained_cnn_model = train_classifier(cnn_classifier_model, cnn_train_loader, cnn_test_loader, 
                                          epochs=CNN_EPOCHS, num_classes=num_classes_for_cnn)
+    duration_cnn_train = time.time() - start_time_cnn_train
+    step_timings['CNN Training & Validation'] = format_time(duration_cnn_train)
+    print(f"--- Finished: CNN Training & Validation in {format_time(duration_cnn_train)} ---")
 
-    # Final Evaluation on Test Data (using the test_loader)
-    print("\n--- Final CNN Evaluation on Test Data ---")
-    trained_cnn_model.eval() # Ensure model is in evaluation mode
+    # --- Step 4: Final Evaluation on Test Data ---
+    print("\n--- Starting: Final CNN Evaluation on Test Data ---")
+    start_time_final_eval = time.time()
+    trained_cnn_model.eval() 
     
-    final_test_loss = 0
-    all_final_preds = []
-    all_final_labels = []
+    all_final_preds_list = []
+    all_final_labels_list = []
     
-    criterion_cnn = nn.BCEWithLogitsLoss() if num_classes_for_cnn == 1 else nn.CrossEntropyLoss()
-
     with torch.no_grad():
         for features, labels in cnn_test_loader: # Use cnn_test_loader
             features, labels = features.to(DEVICE), labels.to(DEVICE)
             outputs = trained_cnn_model(features)
-            loss = criterion_cnn(outputs, labels)
-            final_test_loss += loss.item()
-            
             if num_classes_for_cnn == 1:
                 predicted_final = (torch.sigmoid(outputs) > 0.5).float()
             else:
-                _, predicted_final = torch.max(outputs.data, 1) # For multi-class
+                _, predicted_final = torch.max(outputs.data, 1)
+            all_final_preds_list.extend(predicted_final.cpu().numpy())
+            all_final_labels_list.extend(labels.cpu().numpy())
+
+    all_final_labels_np = np.array(all_final_labels_list).squeeze()
+    all_final_preds_np = np.array(all_final_preds_list).squeeze()
+
+    target_names_report = ['Normal (Class 0)', 'Abnormal (Class 1)']
+    final_report_dict = classification_report(all_final_labels_np, all_final_preds_np, 
+                                              target_names=target_names_report, output_dict=True, zero_division=0)
+    duration_final_eval = time.time() - start_time_final_eval
+    step_timings['Final CNN Evaluation'] = format_time(duration_final_eval)
+    print(f"--- Finished: Final CNN Evaluation in {format_time(duration_final_eval)} ---")
+
+    print("\n--- Final Test Performance Report (Percentage Format) ---")
+    # Overall Accuracy
+    if 'accuracy' in final_report_dict:
+        print(f"Overall Accuracy: {final_report_dict['accuracy']*100:.2f}%")
+    
+    print("-" * 50) # Separator
+
+    # Per-class metrics
+    for class_name in target_names_report:
+        if class_name in final_report_dict:
+            metrics = final_report_dict[class_name]
+            print(f"Class: {class_name}")
+            print(f"  Recall:    {metrics['recall']*100:.2f}%")
+            print(f"  Precision: {metrics['precision']*100:.2f}%")
+            print(f"  F1-Score:  {metrics['f1-score']*100:.2f}%")
+            print(f"  Support:   {metrics['support']}") # Support is a count, not percentage
+            print("-" * 30) # Separator for classes
             
-            all_final_preds.extend(predicted_final.cpu().numpy())
-            all_final_labels.extend(labels.cpu().numpy())
-
-    avg_final_test_loss = final_test_loss / len(cnn_test_loader)
+    # Averaged metrics (macro and weighted)
+    for avg_type in ['macro avg', 'weighted avg']:
+        if avg_type in final_report_dict:
+            metrics = final_report_dict[avg_type]
+            print(f"{avg_type.replace('avg', 'Average').title()}:") # Make it look nicer e.g. "Macro Average"
+            print(f"  Recall:    {metrics['recall']*100:.2f}%")
+            print(f"  Precision: {metrics['precision']*100:.2f}%")
+            print(f"  F1-Score:  {metrics['f1-score']*100:.2f}%")
+            # Support for averages might also be present in report_dict, but usually not displayed as prominently
+            if 'support' in metrics:
+                 print(f"  Support:   {metrics['support']}")
+            print("-" * 30)
     
-    all_final_labels_np = np.array(all_final_labels).squeeze()
-    all_final_preds_np = np.array(all_final_preds).squeeze()
-
-    final_accuracy = accuracy_score(all_final_labels_np, all_final_preds_np) * 100
-    final_precision = precision_score(all_final_labels_np, all_final_preds_np, zero_division=0) * 100
-    final_recall = recall_score(all_final_labels_np, all_final_preds_np, zero_division=0) * 100
-    final_f1 = f1_score(all_final_labels_np, all_final_preds_np, zero_division=0) * 100
+    # The line below that printed the default string report can now be removed or commented out:
+    # print(classification_report(all_final_labels_np, all_final_preds_np, target_names=target_names_report, zero_division=0))
     
-    print(f"Test Loss: {avg_final_test_loss:.4f}")
-    print(f"Test Accuracy: {final_accuracy:.2f}%")
-    print(f"Test Precision: {final_precision:.2f}%")
-    print(f"Test Recall: {final_recall:.2f}%")
-    print(f"Test F1-Score: {final_f1:.2f}%")
-
-    # Optional: Detailed Confusion Matrix for final test results
-    final_conf_matrix = confusion_matrix(all_final_labels_np, all_final_preds_np)
-    print(f"Test Confusion Matrix:\n{final_conf_matrix}")
+    save_results_table(final_report_dict, step_timings, output_path="nslkdd_pytorch_results.png")
 
     print("\nProcess finished.")
+    print("\n--- Summary of Step Timings ---")
+    for step, time_taken in step_timings.items():
+        print(f"Time for {step}: {time_taken}")
