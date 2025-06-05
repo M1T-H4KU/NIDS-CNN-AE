@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from sklearn.metrics import accuracy_score, classification_report
+from torch.utils.data import DataLoader
 # from utils import TrainingLossEarlyStopper # Will be imported in main.py and instance passed
 
 def train_autoencoder(model, dataloader, epochs, learning_rate, device, early_stopper=None):
