@@ -7,6 +7,27 @@ from torch.utils.data import Dataset
 from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+import configs as cfg
+
+# Define the multi-class mapping
+NSL_KDD_CLASS_MAPPING = {
+    'normal': 0,
+    # DoS
+    'back': 1, 'land': 1, 'neptune': 1, 'pod': 1, 'smurf': 1, 'teardrop': 1,
+    'mailbomb': 1, 'processtable': 1, 'udpstorm': 1, 'apache2': 1, 'worm': 1,
+    # Probe
+    'satan': 2, 'ipsweep': 2, 'nmap': 2, 'portsweep': 2,
+    'mscan': 2, 'saint': 2,
+    # R2L
+    'guess_passwd': 3, 'ftp_write': 3, 'imap': 3, 'phf': 3, 'multihop': 3,
+    'warezmaster': 3, 'warezclient': 3, 'spy': 3, 'xlock': 3, 'xsnoop': 3,
+    'snmpguess': 3, 'snmpgetattack': 3, 'httptunnel': 3, 'sendmail': 3, 'named': 3,
+    # U2R
+    'buffer_overflow': 4, 'loadmodule': 4, 'perl': 4, 'rootkit': 4,
+    'sqlattack': 4, 'xterm': 4, 'ps': 4
+}
+# Default label for unknown attack types if any (can be mapped to a general attack category or ignored)
+DEFAULT_ATTACK_LABEL = 1 # Default to DoS if specific attack not in map (or handle as error)
 
 class NSLKDDDataset(Dataset):
     def __init__(self, features, labels=None):
@@ -21,14 +42,20 @@ class NSLKDDDataset(Dataset):
         if self.labels is not None:
             y = self.labels[idx]
             return x, y
-        return x # For AE training or GAN real data loader
+        return x
 
+def map_attack_to_multiclass(attack_type_str):
+    # Use the mapping from configs.py
+    return cfg.NSL_KDD_CLASS_MAPPING_STR_TO_INT.get(
+        attack_type_str, 
+        cfg.DEFAULT_ATTACK_LABEL_INT if attack_type_str != 'normal' else 0
+    )
 def load_and_preprocess_nsl_kdd(base_path, train_filename, test_filename):
-    print(f"Loading and preprocessing NSL-KDD data from {base_path}...")
+    print(f"Loading and preprocessing NSL-KDD data from {base_path} for multi-class GAN...")
     train_path = os.path.join(base_path, train_filename)
     test_path = os.path.join(base_path, test_filename)
 
-    column_names = [
+    column_names = [ # ... (column names as before) ...
         'duration', 'protocol_type', 'service', 'flag', 'src_bytes', 'dst_bytes',
         'land', 'wrong_fragment', 'urgent', 'hot', 'num_failed_logins',
         'logged_in', 'num_compromised', 'root_shell', 'su_attempted',
@@ -51,12 +78,17 @@ def load_and_preprocess_nsl_kdd(base_path, train_filename, test_filename):
         raise
 
     X_train_raw = df_train.iloc[:, :-2]
-    y_train_labels_raw = df_train['attack_type']
+    y_train_labels_raw_str = df_train['attack_type'] # Keep as string initially
     X_test_raw = df_test.iloc[:, :-2]
-    y_test_labels_raw = df_test['attack_type']
+    y_test_labels_raw_str = df_test['attack_type']   # Keep as string initially
 
-    y_train = y_train_labels_raw.apply(lambda x: 0 if x == 'normal' else 1).values
-    y_test = y_test_labels_raw.apply(lambda x: 0 if x == 'normal' else 1).values
+    # Apply multi-class mapping for GAN training
+    y_train_multiclass = y_train_labels_raw_str.apply(map_attack_to_multiclass).values
+    y_test_multiclass = y_test_labels_raw_str.apply(map_attack_to_multiclass).values
+    
+    print(f"Unique multi-class labels in training set: {np.unique(y_train_multiclass)}")
+    print(f"Unique multi-class labels in test set: {np.unique(y_test_multiclass)}")
+
 
     categorical_features_indices = [1, 2, 3]
     numerical_features_indices = [i for i in range(X_train_raw.shape[1]) if i not in categorical_features_indices]
@@ -72,14 +104,19 @@ def load_and_preprocess_nsl_kdd(base_path, train_filename, test_filename):
     X_train_processed = preprocessor.fit_transform(X_train_raw).astype(np.float32)
     X_test_processed = preprocessor.transform(X_test_raw).astype(np.float32)
 
-    num_features_processed = X_train_processed.shape[1] # This will be returned
+    num_features_processed = X_train_processed.shape[1]
     print(f"Data preprocessed. Number of features: {num_features_processed}")
-    print(f"X_train_processed shape: {X_train_processed.shape}, y_train shape: {y_train.shape}")
-    print(f"X_test_processed shape: {X_test_processed.shape}, y_test shape: {y_test.shape}")
 
-    X_train_tensor = torch.from_numpy(X_train_processed)
-    y_train_tensor = torch.from_numpy(y_train).float().unsqueeze(1)
-    X_test_tensor = torch.from_numpy(X_test_processed)
-    y_test_tensor = torch.from_numpy(y_test).float().unsqueeze(1)
+    # Tensors with original multi-class labels (for BEGAN)
+    X_train_original_tensor = torch.from_numpy(X_train_processed)
+    y_train_original_multiclass_tensor = torch.from_numpy(y_train_multiclass).long().unsqueeze(1) # Use long for class indices, keep as (N,1)
+    
+    X_test_original_tensor = torch.from_numpy(X_test_processed)
+    y_test_original_multiclass_tensor = torch.from_numpy(y_test_multiclass).long().unsqueeze(1) # Use long for class indices
 
-    return X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor, num_features_processed
+    print(f"Shapes for BEGAN/multi-class: X_train={X_train_original_tensor.shape}, y_train_multi={y_train_original_multiclass_tensor.shape}")
+    
+    print(f"Unique multi-class labels in training set after mapping: {np.unique(y_train_multiclass)}")
+    return X_train_original_tensor, y_train_original_multiclass_tensor, \
+           X_test_original_tensor, y_test_original_multiclass_tensor, \
+           num_features_processed

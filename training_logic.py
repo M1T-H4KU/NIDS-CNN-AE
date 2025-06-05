@@ -150,20 +150,23 @@ def extract_ae_features(encoder_model, dataloader, device, batch_size): # encode
     return torch.cat(all_features_list, dim=0)
 
 
-def train_classifier(model, train_loader, val_loader, epochs, learning_rate, device, num_classes=1, early_stopper=None):
+def train_classifier(model, train_loader, val_loader, epochs, learning_rate, device, 
+                     num_classes=1, early_stopper=None, target_names_report=None):
     model.to(device)
     criterion = nn.BCEWithLogitsLoss() if num_classes == 1 else nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    target_names_report = ['Normal (Class 0)', 'Abnormal (Class 1)'] # Specific to binary
+    
+    if target_names_report is None:
+        target_names_report = ['Normal (Class 0)', 'Abnormal (Class 1)'] if num_classes == 1 else [f'Class_{i}' for i in range(num_classes)]
 
-    print(f"\n--- Training CNN Classifier on {device} ---")
+    print(f"\n--- Training CNN Classifier on {device} (Classes: {num_classes}) ---")
     if early_stopper: early_stopper.reset()
         
     for epoch in range(epochs):
         model.train()
         train_loss_sum = 0
-        all_train_preds_list = []
-        all_train_labels_list = []
+        all_train_preds_list = [] # For epoch's training accuracy
+        all_train_labels_list = [] # For epoch's training accuracy
 
         for batch_features, batch_labels in train_loader:
             batch_features, batch_labels = batch_features.to(device), batch_labels.to(device)
@@ -174,53 +177,62 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
             optimizer.step()
             train_loss_sum += loss.item() * batch_features.size(0)
 
-            if num_classes == 1: predicted = (torch.sigmoid(outputs) > 0.5).float()
-            else: _, predicted = torch.max(outputs.data, 1)
-            all_train_preds_list.extend(predicted.cpu().numpy().squeeze())
-            all_train_labels_list.extend(batch_labels.cpu().numpy().squeeze())
+            if num_classes == 1:
+                predicted = (torch.sigmoid(outputs) > 0.5).float() # Shape (B,1)
+            else:
+                _, predicted = torch.max(outputs.data, 1) # Shape (B,)
             
-        avg_train_loss = train_loss_sum / len(train_loader.dataset)
-        # Ensure lists are not empty before calling accuracy_score
+            # Use view(-1) for robust flattening for training metrics
+            all_train_preds_list.extend(predicted.view(-1).cpu().numpy())
+            all_train_labels_list.extend(batch_labels.view(-1).cpu().numpy())
+            
+        avg_train_loss = train_loss_sum / len(train_loader.dataset) if len(train_loader.dataset) > 0 else 0
         train_accuracy_epoch = accuracy_score(all_train_labels_list, all_train_preds_list) * 100 if len(all_train_labels_list) > 0 else 0.0
         
+        # Validation
         model.eval()
         val_loss_sum = 0
-        all_val_preds_list = []
-        all_val_labels_list = []
+        all_val_preds_list = [] # For epoch's validation metrics
+        all_val_labels_list = [] # For epoch's validation metrics
         with torch.no_grad():
             for batch_features, batch_labels in val_loader:
                 batch_features, batch_labels = batch_features.to(device), batch_labels.to(device)
                 outputs = model(batch_features)
                 loss_val = criterion(outputs, batch_labels)
                 val_loss_sum += loss_val.item() * batch_features.size(0)
-                if num_classes == 1: predicted_val = (torch.sigmoid(outputs) > 0.5).float()
-                else: _, predicted_val = torch.max(outputs.data, 1)
-                all_val_preds_list.extend(predicted_val.cpu().numpy().squeeze())
-                all_val_labels_list.extend(batch_labels.cpu().numpy().squeeze())
+                
+                if num_classes == 1:
+                    predicted_val = (torch.sigmoid(outputs) > 0.5).float() # Shape (B,1)
+                else:
+                    _, predicted_val = torch.max(outputs.data, 1) # Shape (B,)
+                
+                # Use view(-1) for robust flattening for validation metrics
+                all_val_preds_list.extend(predicted_val.view(-1).cpu().numpy())
+                all_val_labels_list.extend(batch_labels.view(-1).cpu().numpy())
 
         avg_val_loss = val_loss_sum / len(val_loader.dataset) if len(val_loader.dataset) > 0 else 0
         
-        # Ensure lists are not empty before calling classification_report
+        report_dict_val = {}
+        val_accuracy = 0.0
         if len(all_val_labels_list) > 0:
-            report_dict = classification_report(all_val_labels_list, all_val_preds_list, 
-                                                target_names=target_names_report, output_dict=True, zero_division=0)
-            val_accuracy = report_dict['accuracy'] * 100
-        else:
-            report_dict = {} # Empty report
-            val_accuracy = 0.0
-
-
+            report_dict_val = classification_report(all_val_labels_list, all_val_preds_list, 
+                                                target_names=target_names_report, 
+                                                output_dict=True, zero_division=0)
+            if 'accuracy' in report_dict_val:
+                val_accuracy = report_dict_val['accuracy'] * 100
+        
         if (epoch + 1) % 5 == 0 or epoch == 0 or epoch == epochs -1 :
             print(f"CNN Epoch [{epoch+1}/{epochs}]:")
             print(f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy_epoch:.2f}%")
             print(f"  Val Loss  : {avg_val_loss:.4f}, Val Acc: {val_accuracy:.2f}%")
-            if report_dict: # if report was generated
-                for class_name_report in target_names_report:
-                    if class_name_report in report_dict:
-                        print(f"  {class_name_report}: "
-                              f"P: {report_dict[class_name_report]['precision']*100:.2f}%, "
-                              f"R: {report_dict[class_name_report]['recall']*100:.2f}%, "
-                              f"F1: {report_dict[class_name_report]['f1-score']*100:.2f}%")
+            if report_dict_val:
+                for class_name_in_report in target_names_report: 
+                    if class_name_in_report in report_dict_val:
+                        metrics = report_dict_val[class_name_in_report]
+                        print(f"    {class_name_in_report}: " # Indent for validation epoch log
+                              f"P: {metrics.get('precision',0)*100:.2f}%, "
+                              f"R: {metrics.get('recall',0)*100:.2f}%, "
+                              f"F1: {metrics.get('f1-score',0)*100:.2f}%")
         if early_stopper and early_stopper(avg_train_loss):
             break
     print("CNN training finished.")
