@@ -91,7 +91,7 @@ def load_and_preprocess_nsl_kdd(base_path, train_filename, test_filename):
     train_path = os.path.join(base_path, train_filename)
     test_path = os.path.join(base_path, test_filename)
 
-    column_names = [ # ... (full column names as before) ...
+    column_names = [ 
         'duration', 'protocol_type', 'service', 'flag', 'src_bytes', 'dst_bytes',
         'land', 'wrong_fragment', 'urgent', 'hot', 'num_failed_logins',
         'logged_in', 'num_compromised', 'root_shell', 'su_attempted',
