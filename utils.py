@@ -54,26 +54,26 @@ def save_results_table(report_dict, timings_data, output_path="results_summary.p
         metric_values.append("N/A")
     elif classifier_mode == "binary":
         metric_labels = ['Overall Accuracy', 
-                         'Normal - Precision', 'Normal - Recall', 'Normal - F1-Score', 'Normal - Support',
-                         'Abnormal - Precision', 'Abnormal - Recall', 'Abnormal - F1-Score', 'Abnormal - Support',
-                         'Macro Avg - Precision', 'Macro Avg - Recall', 'Macro Avg - F1-Score', 'Macro Avg - Support',
-                         'Weighted Avg - Precision', 'Weighted Avg - Recall', 'Weighted Avg - F1-Score', 'Weighted Avg - Support']
+                         'Normal - Recall', 'Normal - Precision', 'Normal - F1-Score', 'Normal - Support',
+                         'Abnormal - Recall', 'Abnormal - Precision', 'Abnormal - F1-Score', 'Abnormal - Support',
+                         'Macro Avg - Recall', 'Macro Avg - Precision', 'Macro Avg - F1-Score', 'Macro Avg - Support',
+                         'Weighted Avg - Recall', 'Weighted Avg - Precision', 'Weighted Avg - F1-Score', 'Weighted Avg - Support']
         metric_values = [
             f"{report_dict.get('accuracy', 0)*100:.2f}%",
-            f"{report_dict.get('Normal (Class 0)', {}).get('precision', 0)*100:.2f}%", # Assuming target_names were used
             f"{report_dict.get('Normal (Class 0)', {}).get('recall', 0)*100:.2f}%",
+            f"{report_dict.get('Normal (Class 0)', {}).get('precision', 0)*100:.2f}%", # Assuming target_names were used
             f"{report_dict.get('Normal (Class 0)', {}).get('f1-score', 0)*100:.2f}%",
             f"{report_dict.get('Normal (Class 0)', {}).get('support', 0)}",
-            f"{report_dict.get('Abnormal (Class 1)', {}).get('precision', 0)*100:.2f}%",
             f"{report_dict.get('Abnormal (Class 1)', {}).get('recall', 0)*100:.2f}%",
+            f"{report_dict.get('Abnormal (Class 1)', {}).get('precision', 0)*100:.2f}%",
             f"{report_dict.get('Abnormal (Class 1)', {}).get('f1-score', 0)*100:.2f}%",
             f"{report_dict.get('Abnormal (Class 1)', {}).get('support', 0)}",
-            f"{report_dict.get('macro avg', {}).get('precision', 0)*100:.2f}%",
             f"{report_dict.get('macro avg', {}).get('recall', 0)*100:.2f}%",
+            f"{report_dict.get('macro avg', {}).get('precision', 0)*100:.2f}%",
             f"{report_dict.get('macro avg', {}).get('f1-score', 0)*100:.2f}%",
             f"{report_dict.get('macro avg', {}).get('support', 0)}",
-            f"{report_dict.get('weighted avg', {}).get('precision', 0)*100:.2f}%",
             f"{report_dict.get('weighted avg', {}).get('recall', 0)*100:.2f}%",
+            f"{report_dict.get('weighted avg', {}).get('precision', 0)*100:.2f}%",
             f"{report_dict.get('weighted avg', {}).get('f1-score', 0)*100:.2f}%",
             f"{report_dict.get('weighted avg', {}).get('support', 0)}"
         ]
@@ -86,11 +86,11 @@ def save_results_table(report_dict, timings_data, output_path="results_summary.p
                 # report_dict uses string keys for classes from target_names
                 class_key = name 
                 metric_labels.extend([
-                    f'{name} - Precision', f'{name} - Recall', f'{name} - F1-Score', f'{name} - Support'
+                    f'{name} - Recall', f'{name} - Precision', f'{name} - F1-Score', f'{name} - Support'
                 ])
                 metric_values.extend([
-                    f"{report_dict.get(class_key, {}).get('precision', 0)*100:.2f}%",
                     f"{report_dict.get(class_key, {}).get('recall', 0)*100:.2f}%",
+                    f"{report_dict.get(class_key, {}).get('precision', 0)*100:.2f}%",
                     f"{report_dict.get(class_key, {}).get('f1-score', 0)*100:.2f}%",
                     f"{report_dict.get(class_key, {}).get('support', 0)}"
                 ])
@@ -98,12 +98,12 @@ def save_results_table(report_dict, timings_data, output_path="results_summary.p
         for avg_type in ['macro avg', 'weighted avg']:
             if avg_type in report_dict:
                 metric_labels.extend([
-                    f'{avg_type.title()} - Precision', f'{avg_type.title()} - Recall', 
+                    f'{avg_type.title()} - Recall', f'{avg_type.title()} - Precision', 
                     f'{avg_type.title()} - F1-Score', f'{avg_type.title()} - Support'
                 ])
                 metric_values.extend([
-                    f"{report_dict[avg_type].get('precision', 0)*100:.2f}%",
                     f"{report_dict[avg_type].get('recall', 0)*100:.2f}%",
+                    f"{report_dict[avg_type].get('precision', 0)*100:.2f}%",
                     f"{report_dict[avg_type].get('f1-score', 0)*100:.2f}%",
                     f"{report_dict[avg_type].get('support', 0)}"
                 ])
