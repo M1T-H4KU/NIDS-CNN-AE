@@ -1,26 +1,31 @@
 # main.py
-import os
-import time
-import torch
-from torch.utils.data import DataLoader
-import numpy as np
-from sklearn.metrics import classification_report
 import argparse
-
-# Import from our refactored modules
-import configs as cfg
-from utils import ValidationLossEarlyStopper, format_time, save_results_table
-from data_loader import NSLKDDDataset, load_and_preprocess_nsl_kdd
-from models import Autoencoder, Generator, CNNClassifier
-from training_logic import (
-    train_autoencoder, train_began_for_class, train_classifier,
-    extract_ae_features, augment_data_with_gan
-)
+import sys
+import time
+import os
 
 def main(args):
     """
     Main execution function that runs the entire pipeline based on command-line arguments.
     """
+    
+    # --- Step 0: Imports and Initial Setup ---
+    print("Imports loaded. Starting main execution...")
+    
+    import torch
+    from torch.utils.data import DataLoader
+    from sklearn.metrics import classification_report
+    
+    import configs as cfg
+    from utils import ValidationLossEarlyStopper, format_time, save_results_table
+    from data_loader import NSLKDDDataset, load_and_preprocess_nsl_kdd
+    from models import Autoencoder, Generator, CNNClassifier
+    from training_logic import (
+        train_autoencoder, train_began_for_class, train_classifier,
+        extract_ae_features, augment_data_with_gan
+    )
+    
+    
     print(f"Using device: {cfg.DEVICE}")
     print(f"Running with arguments: GAN Augmentation={'Enabled' if args.use_gan else 'Disabled'}, "
           f"Outlier Removal={'Enabled' if args.use_outlier_removal else 'Disabled'}, "
@@ -302,10 +307,14 @@ if __name__ == '__main__':
         '--model',
         type=str,
         required=True,
-        choices=['cnn', 'cnnae'],
+        choices=['cnn', 'dnn', 'lstm', 'cnnae', 'dnnae', 'lstmae'],
         help="Select the model pipeline to use (REQUIRED):\n"
              "  'cnn':   Directly train CNN on preprocessed data.\n"
-             "  'cnnae': Use Autoencoder for feature extraction before CNN."
+             "  'cnnae': Use Autoencoder for feature extraction before CNN.\n"
+             "  'dnn':   Directly train DNN on preprocessed data.\n"
+             "  'dnnae': Use Autoencoder for feature extraction before DNN.\n"
+             "  'lstm':  Directly train LSTM on preprocessed data.\n"
+             "  'lstmae': Use Autoencoder for feature extraction before LSTM."
     )
 
     cli_args = parser.parse_args()
