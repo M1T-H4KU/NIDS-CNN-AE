@@ -233,7 +233,7 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
                               f"P: {metrics.get('precision',0)*100:.2f}%, "
                               f"R: {metrics.get('recall',0)*100:.2f}%, "
                               f"F1: {metrics.get('f1-score',0)*100:.2f}%")
-        if early_stopper and early_stopper(avg_train_loss):
+        if early_stopper and early_stopper(avg_val_loss):
             break
     print("CNN training finished.")
     return model

@@ -4,44 +4,32 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 
-class TrainingLossEarlyStopper:
-    def __init__(self, patience=35, rel_delta_threshold=1e-6):
+class ValidationLossEarlyStopper:
+    def __init__(self, patience=35, min_delta=1e-6):
         self.patience = patience
-        self.rel_delta_threshold = rel_delta_threshold
-        self.consecutive_count = 0
-        self.previous_loss = None
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = float('inf')
         self.early_stop_triggered = False
 
-    def __call__(self, current_loss):
-        if self.early_stop_triggered: # If already stopped, stay stopped
+    def __call__(self, val_loss):
+        if self.early_stop_triggered:
             return True
-            
-        if self.previous_loss is None:
-            self.previous_loss = current_loss
-            return False
-
-        if self.previous_loss == 0:
-            relative_diff = 0.0 if current_loss == 0 else float('inf')
+        
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
         else:
-            relative_diff = abs(self.previous_loss - current_loss) / abs(self.previous_loss)
-
-        if relative_diff < self.rel_delta_threshold:
-            self.consecutive_count += 1
-        else:
-            self.consecutive_count = 0
-
-        self.previous_loss = current_loss
-
-        if self.consecutive_count >= self.patience:
-            print(f"Early stopping: Relative training loss difference < {self.rel_delta_threshold} "
-                  f"for {self.patience} consecutive epochs.")
-            self.early_stop_triggered = True
-            return True
+            self.counter += 1
+            if self.counter >= self.patience:
+                print(f"Early stopping: Validation loss did not improve for {self.patience} consecutive epochs.")
+                self.early_stop_triggered = True
+                return True
         return False
     
     def reset(self):
-        self.consecutive_count = 0
-        self.previous_loss = None
+        self.counter = 0
+        self.best_loss = float('inf')
         self.early_stop_triggered = False
 
 
