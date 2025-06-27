@@ -1,6 +1,7 @@
 # utils.py
 import time
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from collections import deque
 
@@ -39,6 +40,63 @@ def format_time(seconds):
     s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
+def display_data_samples(data_tensor, description, n_samples=10, n_features=15):
+    """
+    Prints a sample of the data from a tensor in a readable DataFrame format.
+    """
+    print(f"\n--- Displaying {n_samples} Samples for: {description} ---")
+    if data_tensor is None or len(data_tensor) == 0:
+        print("  No data to display.")
+        print("-" * (len(description) + 30))
+        return
+    
+    num_samples_to_show = min(n_samples, len(data_tensor))
+    num_features_to_show = min(n_features, data_tensor.shape[1])
+    
+    df = pd.DataFrame(data_tensor[:num_samples_to_show, :num_features_to_show].cpu().numpy())
+    df.columns = [f'F{i+1}' for i in range(num_features_to_show)]
+    
+    with pd.option_context('display.max_rows', None, 'display.max_columns', None, 'display.width', 1000):
+        print(f"  (Showing first {num_features_to_show} of {data_tensor.shape[1]} features)")
+        print(df.round(4))
+    print("-" * (len(description) + 30))
+
+
+def save_results_table(report_dict, timings_data, output_path="results_summary.png", classifier_mode="binary", class_names=None):
+    """
+    Generates and saves a table image of metrics and timings.
+    Displays Recall before Precision.
+    """
+    # <<< MODIFIED: Reordered Recall and Precision >>>
+    metric_labels, metric_values = [], []
+    if not report_dict:
+        metric_labels.append("Metrics"); metric_values.append("N/A")
+    else:
+        metric_labels.append('Overall Accuracy')
+        metric_values.append(f"{report_dict.get('accuracy', 0)*100:.2f}%")
+        
+        # Determine which classes to report on
+        keys_to_report = class_names if classifier_mode == "multiclass" and class_names is not None else ['Normal (Class 0)', 'Abnormal (Class 1)']
+        
+        for class_key in keys_to_report:
+            if class_key in report_dict:
+                metric_labels.extend([f'{class_key} - Recall', f'{class_key} - Precision', f'{class_key} - F1-Score', f'{class_key} - Support'])
+                metric_values.extend([
+                    f"{report_dict[class_key].get('recall', 0)*100:.2f}%",
+                    f"{report_dict[class_key].get('precision', 0)*100:.2f}%",
+                    f"{report_dict[class_key].get('f1-score', 0)*100:.2f}%",
+                    f"{report_dict[class_key].get('support', 0)}"
+                ])
+
+        for avg_type in ['macro avg', 'weighted avg']:
+            if avg_type in report_dict:
+                metric_labels.extend([f'{avg_type.title()} - Recall', f'{avg_type.title()} - Precision', f'{avg_type.title()} - F1-Score', f'{avg_type.title()} - Support'])
+                metric_values.extend([
+                    f"{report_dict[avg_type].get('recall', 0)*100:.2f}%",
+                    f"{report_dict[avg_type].get('precision', 0)*100:.2f}%",
+                    f"{report_dict[avg_type].get('f1-score', 0)*100:.2f}%",
+                    f"{report_dict[avg_type].get('support', 0)}"
+                ])
 
 def save_results_table(report_dict, timings_data, output_path="results_summary.png", classifier_mode="binary", class_names=None):
     """

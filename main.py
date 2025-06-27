@@ -17,7 +17,7 @@ def main(args):
     from sklearn.metrics import classification_report
     
     import configs as cfg
-    from utils import ValidationLossEarlyStopper, format_time, save_results_table
+    from utils import ValidationLossEarlyStopper, format_time, save_results_table, display_data_samples
     from data_loader import NSLKDDDataset, load_and_preprocess_nsl_kdd
     from models import Autoencoder, Generator, CNNClassifier
     from training_logic import (
@@ -44,33 +44,59 @@ def main(args):
     
     print("\n--- Starting: Data Loading & Preprocessing ---")
     start_time_s1 = time.time()
-    X_train_original_tensor, y_train_original_multiclass_tensor, \
-    X_test_original_tensor, y_test_original_multiclass_tensor, \
+    X_train_original_tensor, y_train_original_labels_tensor, \
+    X_test_original_tensor, y_test_original_labels_tensor, \
     NUM_FEATURES_PREPROCESSED = \
         load_and_preprocess_nsl_kdd(cfg.BASE_DATA_PATH, train_file, test_file, perform_outlier_removal=args.use_outlier_removal)
     duration_s1 = time.time() - start_time_s1
     step_timings['Data Loading & Preprocessing'] = format_time(duration_s1)
     print(f"--- Finished: Data Loading & Preprocessing in {format_time(duration_s1)} ---")
-
+    print("\n--- Verifying Original Preprocessed Data ---")
+    # Determine the class names based on the mode data was loaded for
+    is_binary_data = train_file.lower().endswith('.arff')
+    class_map_for_display = {0: 'Normal', 1: 'Abnormal'} if is_binary_data else cfg.NSL_KDD_CLASS_NAMES_INT_TO_STR
+    
+    for class_label, class_name in class_map_for_display.items():
+        class_indices = (y_train_original_labels_tensor.squeeze() == class_label)
+        data_for_class = X_train_original_tensor[class_indices]
+        display_data_samples(data_for_class, f"Original '{class_name}' Data (Class {class_label})")
+        
+        
     # --- Step 2: Class-wise BEGAN Training and Data Augmentation ---
     X_train_final_tensor = X_train_original_tensor
-    y_train_final_multiclass_tensor = y_train_original_multiclass_tensor
+    y_train_final_labels_tensor = y_train_original_labels_tensor
     if args.use_gan:
-        print("\n--- Starting: Class-wise BEGAN Training & Augmentation ---")
+        print("\n--- Starting: BEGAN Data Augmentation ---")
         began_total_start_time = time.time()
         
         X_train_final_tensor_cpu_list = [X_train_original_tensor.cpu()]
-        y_train_final_multiclass_tensor_cpu_list = [y_train_original_multiclass_tensor.cpu()]
+        y_train_final_labels_cpu_list = [y_train_original_labels_tensor.cpu()]
         
-        unique_classes = torch.unique(y_train_original_multiclass_tensor.squeeze().cpu()).numpy()
-        print(f"Found unique classes for BEGAN training: {unique_classes}")
+        # <<< FIX STARTS HERE: Conditional GAN Logic >>>
+        classes_to_augment, num_samples_to_generate, class_name_map = [], 0, {}
+        
+        if args.classifier_mode == 'multiclass':
+            print("Applying MULTI-CLASS augmentation strategy (minority classes only).")
+            classes_to_augment = cfg.NSL_KDD_MINORITY_CLASSES_TO_AUGMENT
+            num_samples_to_generate = cfg.NUM_SYNTHETIC_SAMPLES_PER_MINORITY_CLASS
+            class_name_map = cfg.NSL_KDD_CLASS_NAMES_INT_TO_STR
+        else: # binary
+            print("Applying BINARY augmentation strategy (all classes found).")
+            classes_to_augment = torch.unique(y_train_original_labels_tensor.squeeze().cpu()).numpy()
+            num_samples_to_generate = cfg.NUM_SYNTHETIC_SAMPLES_PER_CLASS
+            class_name_map = {0: 'Normal', 1: 'Abnormal'}
+        
+        existing_classes_in_data = torch.unique(y_train_original_labels_tensor.squeeze().cpu()).numpy()
 
-        for class_label_val in unique_classes:
-            class_label = int(class_label_val)
-            class_name_str = f"Class_{class_label} ({cfg.NSL_KDD_CLASS_NAMES_INT_TO_STR.get(class_label, 'Unknown')})"
+        for class_label in classes_to_augment:
+            if int(class_label) not in existing_classes_in_data:
+                print(f"\nSkipping BEGAN for Class_{int(class_label)}: Not present in the loaded training data.")
+                continue
+
+            class_name_str = f"Class_{int(class_label)} ({class_name_map.get(int(class_label), 'Unknown')})"
             print(f"\nProcessing BEGAN for {class_name_str}")
 
-            class_indices = (y_train_original_multiclass_tensor.squeeze().cpu() == class_label_val)
+            class_indices = (y_train_original_labels_tensor.squeeze().cpu() == class_label)
             X_class_data_cpu = X_train_original_tensor.cpu()[class_indices]
 
             effective_batch_size = min(len(X_class_data_cpu), cfg.GAN_BATCH_SIZE)
@@ -94,41 +120,40 @@ def main(args):
                 cfg.BEGAN_GAMMA, cfg.BEGAN_LAMBDA_K, cfg.BEGAN_K_T_INITIAL, cfg.BEGAN_M_THRESHOLD, cfg.BEGAN_LR
             )
             
-            num_to_generate_for_class = cfg.NUM_SYNTHETIC_SAMPLES_PER_CLASS
-            if num_to_generate_for_class > 0 and trained_g_class is not None:
-                 print(f"  Generating {num_to_generate_for_class} synthetic samples for {class_name_str}...")
-                 synthetic_class_features_cpu = augment_data_with_gan(trained_g_class, cfg.BEGAN_NOISE_DIM, num_to_generate_for_class, cfg.DEVICE, cfg.GAN_BATCH_SIZE)
-                 if synthetic_class_features_cpu.size(0) > 0:
-                     synthetic_class_labels_cpu = torch.full((synthetic_class_features_cpu.size(0), 1), float(class_label), dtype=torch.long)
-                     X_train_final_tensor_cpu_list.append(synthetic_class_features_cpu)
-                     y_train_final_multiclass_tensor_cpu_list.append(synthetic_class_labels_cpu)
-                     print(f"    Added {synthetic_class_features_cpu.size(0)} synthetic samples for {class_name_str} (Target: {num_to_generate_for_class}).")
-
-        step_timings['Class-wise BEGAN Training & Augmentation'] = format_time(time.time() - began_total_start_time)
+            if num_samples_to_generate > 0 and trained_g_class is not None:
+                print(f"  Generating {num_samples_to_generate} synthetic samples for {class_name_str}...")
+                synthetic_class_features_cpu = augment_data_with_gan(trained_g_class, cfg.BEGAN_NOISE_DIM, num_samples_to_generate, cfg.DEVICE, cfg.GAN_BATCH_SIZE)
+                display_data_samples(synthetic_class_features_cpu, f"Generated '{class_name_str}' Data")
+                if synthetic_class_features_cpu.size(0) > 0:
+                    synthetic_class_labels_cpu = torch.full((synthetic_class_features_cpu.size(0), 1), float(class_label), dtype=torch.long)
+                    X_train_final_tensor_cpu_list.append(synthetic_class_features_cpu)
+                    y_train_final_labels_cpu_list.append(synthetic_class_labels_cpu)
+                    print(f"    Added {synthetic_class_features_cpu.size(0)} synthetic samples for {class_name_str} (Target: {num_samples_to_generate}).")
         
-        # Combine original and all generated data
+        step_timings['BEGAN Augmentation'] = format_time(time.time() - began_total_start_time)
         X_train_final_tensor = torch.cat(X_train_final_tensor_cpu_list, dim=0)
-        y_train_final_multiclass_tensor = torch.cat(y_train_final_multiclass_tensor_cpu_list, dim=0)
+        y_train_final_labels_tensor = torch.cat(y_train_final_labels_cpu_list, dim=0)
+        # <<< FIX ENDS HERE >>>
     else:
         print("\n--- Skipping BEGAN-based Data Augmentation ---")
-        step_timings['Class-wise BEGAN Training & Augmentation'] = "Skipped"
+        step_timings['BEGAN Augmentation'] = "Skipped"
 
     # Shuffle the final combined training dataset
     shuffle_indices = torch.randperm(X_train_final_tensor.size(0))
-    X_train_final_tensor, y_train_final_multiclass_tensor = X_train_final_tensor[shuffle_indices], y_train_final_multiclass_tensor[shuffle_indices]
-    print(f"Final training data (multi-class labels) shape: X={X_train_final_tensor.shape}, y={y_train_final_multiclass_tensor.shape}")
+    X_train_final_tensor, y_train_final_labels_tensor = X_train_final_tensor[shuffle_indices], y_train_final_labels_tensor[shuffle_indices]
+    print(f"Final training data shape: X={X_train_final_tensor.shape}, y={y_train_final_labels_tensor.shape}")
 
     # --- Prepare labels for the selected classifier mode ---
     if args.classifier_mode == "binary":
         num_classes_for_cnn = 1
-        y_train_for_cnn_tensor = (y_train_final_multiclass_tensor.squeeze() != 0).float().unsqueeze(1)
-        y_test_for_cnn_tensor = (y_test_original_multiclass_tensor.squeeze() != 0).float().unsqueeze(1)
+        y_train_for_cnn_tensor = (y_train_final_labels_tensor.squeeze() != 0).float().unsqueeze(1)
+        y_test_for_cnn_tensor = (y_test_original_labels_tensor.squeeze() != 0).float().unsqueeze(1)
         target_names_for_report = ['Normal (Class 0)', 'Abnormal (Class 1)']
         print(f"Classifier mode: Binary. Target labels prepared.")
     else: # multiclass
         num_classes_for_cnn = cfg.NUM_ORIGINAL_CLASSES
-        y_train_for_cnn_tensor = y_train_final_multiclass_tensor.squeeze().long()
-        y_test_for_cnn_tensor = y_test_original_multiclass_tensor.squeeze().long()
+        y_train_for_cnn_tensor = y_train_final_labels_tensor.squeeze().long()
+        y_test_for_cnn_tensor = y_test_original_labels_tensor.squeeze().long()
         target_names_for_report = [cfg.NSL_KDD_CLASS_NAMES_INT_TO_STR[i] for i in range(cfg.NUM_ORIGINAL_CLASSES)]
         print(f"Classifier mode: Multi-class ({num_classes_for_cnn} classes). Target labels prepared.")
 
@@ -136,40 +161,33 @@ def main(args):
     X_train_for_cnn, X_test_for_cnn, input_dim_for_cnn = None, None, 0
     actual_latent_dim_for_cnn = cfg.AE_LATENT_DIM
 
-    if args.model == 'cnnae':
-        print("\n--- Model Pipeline: CNNAE (Autoencoder for Feature Extraction) ---")
+    # 'ae' logic for models that use the autoencoder
+    if 'ae' in args.model:
+        print(f"\n--- Model Pipeline: {args.model.upper()} (Autoencoder for Feature Extraction) ---")
         current_extracted_features_file = cfg.EXTRACTED_FEATURES_FILE_GAN_AUGMENTED if args.use_gan else cfg.EXTRACTED_FEATURES_FILE_ORIGINAL
         
-        # <<< FIX: Initialize variables to None before the try block >>>
-        X_train_features_ae = None
-        X_test_features_ae = None
-
+        X_train_features_ae, X_test_features_ae = None, None
         if os.path.exists(current_extracted_features_file):
             print(f"\n--- Loading pre-extracted AE features from {current_extracted_features_file} ---")
             start_time_s3load = time.time()
             try:
                 loaded_data = torch.load(current_extracted_features_file, map_location=cfg.DEVICE)
-                expected_train_size = len(X_train_final_tensor)
-                cached_train_size = loaded_data['train_features'].shape[0]
-
-                if expected_train_size != cached_train_size:
-                    raise ValueError(f"Stale cache. Expected {expected_train_size} samples, but cache has {cached_train_size}.")
+                if loaded_data['train_features'].shape[0] != len(X_train_final_tensor):
+                    raise ValueError(f"Stale cache detected. Expected {len(X_train_final_tensor)} samples, but cache has {loaded_data['train_features'].shape[0]}.")
                 
                 print(f"  Cache file validated. Loading features.")
-                X_train_features_ae = loaded_data['train_features'].to(cfg.DEVICE)
-                X_test_features_ae = loaded_data['test_features'].to(cfg.DEVICE)
+                X_train_features_ae, X_test_features_ae = loaded_data['train_features'].to(cfg.DEVICE), loaded_data['test_features'].to(cfg.DEVICE)
                 actual_latent_dim_for_cnn = loaded_data.get('latent_dim', X_train_features_ae.shape[1])
                 step_timings['AE Feature Loading'] = format_time(time.time() - start_time_s3load)
                 step_timings['Feature Extraction AE Training'] = "Skipped (loaded features)"
             except Exception as e:
-                print(f"  Error loading or validating cache file: {e}. Re-training AE.")
-                X_train_features_ae = None # Ensure it's None to trigger re-training
+                print(f"  Warning: {e}. Re-training AE.")
+                X_train_features_ae = None
         
         if X_train_features_ae is None:
             print("\n--- Starting: Feature Extraction AE Training ---")
             start_time_s3train_ae = time.time()
             feature_extraction_ae = Autoencoder(NUM_FEATURES_PREPROCESSED, cfg.AE_LATENT_DIM, cfg.AE_HIDDEN_DIM_1)
-            
             ae_train_dataset_for_fe = NSLKDDDataset(X_train_final_tensor)
             ae_train_loader_for_fe = DataLoader(ae_train_dataset_for_fe, batch_size=cfg.AE_BATCH_SIZE, shuffle=True)
             ae_early_stopper.reset()
@@ -178,46 +196,46 @@ def main(args):
 
             print("\n--- Starting: AE Feature Extraction ---")
             start_time_s3extract = time.time()
-            ae_train_extract_loader = DataLoader(NSLKDDDataset(X_train_final_tensor), batch_size=cfg.AE_BATCH_SIZE, shuffle=False)
-            X_train_features_ae = extract_ae_features(feature_extraction_ae, ae_train_extract_loader, cfg.DEVICE, cfg.AE_BATCH_SIZE)
-            
-            ae_test_extract_loader = DataLoader(NSLKDDDataset(X_test_original_tensor), batch_size=cfg.AE_BATCH_SIZE, shuffle=False)
-            X_test_features_ae = extract_ae_features(feature_extraction_ae, ae_test_extract_loader, cfg.DEVICE, cfg.AE_BATCH_SIZE)
-            
+            ae_train_extract_loader, ae_test_extract_loader = DataLoader(NSLKDDDataset(X_train_final_tensor), batch_size=cfg.AE_BATCH_SIZE, shuffle=False), DataLoader(NSLKDDDataset(X_test_original_tensor), batch_size=cfg.AE_BATCH_SIZE, shuffle=False)
+            X_train_features_ae, X_test_features_ae = extract_ae_features(feature_extraction_ae, ae_train_extract_loader, cfg.DEVICE, cfg.AE_BATCH_SIZE), extract_ae_features(feature_extraction_ae, ae_test_extract_loader, cfg.DEVICE, cfg.AE_BATCH_SIZE)
             actual_latent_dim_for_cnn = X_train_features_ae.shape[1] if X_train_features_ae.nelement() > 0 else cfg.AE_LATENT_DIM
             step_timings['AE Feature Extraction (Train/Test)'] = format_time(time.time() - start_time_s3extract)
             
             print(f"  Saving AE features to {current_extracted_features_file}...")
-            torch.save({
-                'train_features': X_train_features_ae.cpu(), 'test_features': X_test_features_ae.cpu(),
-                'latent_dim': actual_latent_dim_for_cnn
-            }, current_extracted_features_file)
+            torch.save({'train_features': X_train_features_ae.cpu(), 'test_features': X_test_features_ae.cpu(), 'latent_dim': actual_latent_dim_for_cnn}, current_extracted_features_file)
 
         X_train_for_cnn, X_test_for_cnn, input_dim_for_cnn = X_train_features_ae, X_test_features_ae, actual_latent_dim_for_cnn
     
-    elif args.model == 'cnn':
-        print("\n--- Model Pipeline: CNN (Directly on preprocessed data) ---")
-        step_timings['Feature Extraction AE Training'] = "Skipped (Direct CNN Model)"
+    # Logic for models that do not use the autoencoder
+    else:
+        print(f"\n--- Model Pipeline: {args.model.upper()} (Directly on preprocessed data) ---")
+        step_timings['Feature Extraction AE Training'] = f"Skipped (Direct {args.model.upper()} Model)"
         X_train_for_cnn, X_test_for_cnn = X_train_final_tensor, X_test_original_tensor
         input_dim_for_cnn = NUM_FEATURES_PREPROCESSED
     
     # --- Step 4: Classifier Training ---
-    print(f"Data ready for CNN. Input Dim: {input_dim_for_cnn}, Train Shape: {X_train_for_cnn.shape}, Test Shape: {X_test_for_cnn.shape}")
+    print(f"\nData ready for Classifier. Input Dim: {input_dim_for_cnn}, Train Shape: {X_train_for_cnn.shape}, Test Shape: {X_test_for_cnn.shape}")
     cnn_train_dataset = NSLKDDDataset(X_train_for_cnn, y_train_for_cnn_tensor.to(cfg.DEVICE))
     cnn_train_loader = DataLoader(cnn_train_dataset, batch_size=cfg.CNN_BATCH_SIZE, shuffle=True)
     cnn_test_dataset = NSLKDDDataset(X_test_for_cnn, y_test_for_cnn_tensor.to(cfg.DEVICE))
     cnn_test_loader = DataLoader(cnn_test_dataset, batch_size=cfg.CNN_BATCH_SIZE, shuffle=False)
 
-    print(f"\n--- Instantiating CNN Model ---")
-    classifier_model = CNNClassifier(
-        input_dim_cnn=input_dim_for_cnn,
-        cnn_filters=cfg.CNN_FILTERS, cnn_kernel_size=cfg.CNN_KERNEL_SIZE,
-        cnn_pool_size=cfg.CNN_POOL_SIZE, cnn_pool_stride=cfg.CNN_POOL_STRIDE,
-        cnn_fc_neurons=cfg.CNN_FC_NEURONS, num_classes=num_classes_for_cnn
-    ).to(cfg.DEVICE)
+    print(f"\n--- Instantiating Classifier Model: {args.model.upper()} ---")
+    classifier_model = None
+    if args.model in ['cnn', 'cnnae']:
+        classifier_model = CNNClassifier(
+            input_dim_cnn=input_dim_for_cnn, cnn_filters=cfg.CNN_FILTERS, cnn_kernel_size=cfg.CNN_KERNEL_SIZE,
+            cnn_pool_size=cfg.CNN_POOL_SIZE, cnn_pool_stride=cfg.CNN_POOL_STRIDE,
+            cnn_fc_neurons=cfg.CNN_FC_NEURONS, num_classes=num_classes_for_cnn
+        )
+    elif args.model in ['dnn', 'dnnae', 'lstm', 'lstmae']:
+        print(f"Error: Model '{args.model}' is not yet implemented. Exiting.")
+        sys.exit(1)
+    
+    classifier_model.to(cfg.DEVICE)
     print("Model Architecture:"); print(classifier_model)
     
-    print(f"\n--- Starting: CNN Classifier Training & Validation ---")
+    print(f"\n--- Starting: Classifier Training & Validation ({args.model.upper()}) ---")
     start_time_s4 = time.time()
     classifier_early_stopper.reset()
     trained_classifier_model = train_classifier(
@@ -250,7 +268,6 @@ def main(args):
             all_final_labels_list, all_final_preds_list, 
             target_names=target_names_for_report, output_dict=True, zero_division=0
         )
-    
     step_timings['Final CNN Evaluation'] = format_time(time.time() - start_time_s5)
     
     print("\n--- Final Test Performance Report (Percentage Format) ---")
@@ -284,29 +301,20 @@ def main(args):
     for step, time_taken in step_timings.items():
         print(f"Time for {step}: {time_taken}")
 
+# --- Main entry point with command-line argument parsing ---
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="NSL-KDD Intrusion Detection with PyTorch, AE, CNN, and optional BEGAN augmentation.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     
-    parser.add_argument(
-        '--use_outlier_removal', 
-        action='store_true', 
-        help="Enable MAD-based outlier removal during preprocessing.\n(Default: Disabled)."
-    )
-    parser.add_argument(
-        '--use_gan', 
-        action='store_true', 
-        help="Enable BEGAN for data augmentation.\n(Default: Disabled)."
-    )
-    parser.add_argument(
-        '--classifier_mode', 
-        type=str, 
-        required=True,
-        choices=['binary', 'multiclass'],
-        help="Set the classifier mode (REQUIRED)."
-    )
+    if len(sys.argv) == 1:
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+        
+    parser.add_argument('--use_outlier_removal', action='store_true', help="Enable MAD-based outlier removal.\n(Default: Disabled).")
+    parser.add_argument('--use_gan', action='store_true', help="Enable BEGAN for data augmentation.\n(Default: Disabled).")
+    parser.add_argument('--classifier_mode', type=str, required=True, choices=['binary', 'multiclass'], help="Set the classifier mode (REQUIRED).")
     parser.add_argument(
         '--model',
         type=str,
