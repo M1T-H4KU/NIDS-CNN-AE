@@ -134,19 +134,26 @@ def main(args):
 
     # --- MODEL PIPELINE SELECTION ---
     X_train_for_cnn, X_test_for_cnn, input_dim_for_cnn = None, None, 0
+    actual_latent_dim_for_cnn = cfg.AE_LATENT_DIM
 
     if args.model == 'cnnae':
         print("\n--- Model Pipeline: CNNAE (Autoencoder for Feature Extraction) ---")
         current_extracted_features_file = cfg.EXTRACTED_FEATURES_FILE_GAN_AUGMENTED if args.use_gan else cfg.EXTRACTED_FEATURES_FILE_ORIGINAL
         
+        # <<< FIX: Initialize variables to None before the try block >>>
+        X_train_features_ae = None
+        X_test_features_ae = None
+
         if os.path.exists(current_extracted_features_file):
             print(f"\n--- Loading pre-extracted AE features from {current_extracted_features_file} ---")
             start_time_s3load = time.time()
             try:
                 loaded_data = torch.load(current_extracted_features_file, map_location=cfg.DEVICE)
                 expected_train_size = len(X_train_final_tensor)
-                if loaded_data['train_features'].shape[0] != expected_train_size:
-                    raise ValueError(f"Stale cache. Expected {expected_train_size} samples, found {loaded_data['train_features'].shape[0]}.")
+                cached_train_size = loaded_data['train_features'].shape[0]
+
+                if expected_train_size != cached_train_size:
+                    raise ValueError(f"Stale cache. Expected {expected_train_size} samples, but cache has {cached_train_size}.")
                 
                 print(f"  Cache file validated. Loading features.")
                 X_train_features_ae = loaded_data['train_features'].to(cfg.DEVICE)
@@ -156,20 +163,17 @@ def main(args):
                 step_timings['Feature Extraction AE Training'] = "Skipped (loaded features)"
             except Exception as e:
                 print(f"  Error loading or validating cache file: {e}. Re-training AE.")
-                X_train_features_ae = None
+                X_train_features_ae = None # Ensure it's None to trigger re-training
         
         if X_train_features_ae is None:
             print("\n--- Starting: Feature Extraction AE Training ---")
             start_time_s3train_ae = time.time()
             feature_extraction_ae = Autoencoder(NUM_FEATURES_PREPROCESSED, cfg.AE_LATENT_DIM, cfg.AE_HIDDEN_DIM_1)
+            
             ae_train_dataset_for_fe = NSLKDDDataset(X_train_final_tensor)
             ae_train_loader_for_fe = DataLoader(ae_train_dataset_for_fe, batch_size=cfg.AE_BATCH_SIZE, shuffle=True)
-            
             ae_early_stopper.reset()
-            # Note: AE training uses training loss for early stopping, but our stopper now uses validation loss.
-            # A proper AE early stopping would use a validation set reconstruction error.
-            # For simplicity here, we pass None to use fixed epochs for the AE.
-            train_autoencoder(feature_extraction_ae, ae_train_loader_for_fe, cfg.DEFAULT_EPOCHS, cfg.AE_LEARNING_RATE, cfg.DEVICE, early_stopper=None)
+            train_autoencoder(feature_extraction_ae, ae_train_loader_for_fe, cfg.DEFAULT_EPOCHS, cfg.AE_LEARNING_RATE, cfg.DEVICE, early_stopper=ae_early_stopper)
             step_timings['Feature Extraction AE Training'] = format_time(time.time() - start_time_s3train_ae)
 
             print("\n--- Starting: AE Feature Extraction ---")
@@ -257,14 +261,14 @@ def main(args):
         if class_name_key in final_report_dict:
             metrics = final_report_dict[class_name_key]
             print(f"Class: {class_name_key}")
-            print(f"  Precision: {metrics.get('precision',0)*100:.2f}% | Recall: {metrics.get('recall',0)*100:.2f}% | "
+            print(f"  Recall: {metrics.get('recall',0)*100:.2f}% | Precision: {metrics.get('precision',0)*100:.2f}% | "
                   f"F1-Score: {metrics.get('f1-score',0)*100:.2f}% | Support: {metrics.get('support',0)}")
             print("-" * 40)
     for avg_type in ['macro avg', 'weighted avg']:
         if avg_type in final_report_dict:
             metrics = final_report_dict[avg_type]
             print(f"{avg_type.replace('avg', 'Average').title()}:")
-            print(f"  Precision: {metrics.get('precision',0)*100:.2f}% | Recall: {metrics.get('recall',0)*100:.2f}% | "
+            print(f"  Recall: {metrics.get('recall',0)*100:.2f}% | Precision: {metrics.get('precision',0)*100:.2f}% | "
                   f"F1-Score: {metrics.get('f1-score',0)*100:.2f}%")
             if 'support' in metrics: print(f"  Support: {metrics.get('support',0)}")
             print("-" * 40)

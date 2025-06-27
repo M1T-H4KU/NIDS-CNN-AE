@@ -13,3 +13,4 @@ wheels/
 datasets/
 *.pt
 *.png
+launch.json
