@@ -40,27 +40,40 @@ def format_time(seconds):
     s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
-def display_data_samples(data_tensor, description, n_samples=10, n_features=15):
+def display_data_samples(data_tensor, description, preprocessor, original_feature_names, n_samples=10):
     """
-    Prints a sample of the data from a tensor in a readable DataFrame format.
+    Reverses the preprocessing for a sample of data and displays it in a
+    human-readable DataFrame format.
     """
-    print(f"\n--- Displaying {n_samples} Samples for: {description} ---")
+    print(f"\n--- Displaying {n_samples} Human-Readable Samples for: {description} ---")
     if data_tensor is None or len(data_tensor) == 0:
         print("  No data to display.")
-        print("-" * (len(description) + 30))
+        print("-" * (len(description) + 40))
         return
     
     num_samples_to_show = min(n_samples, len(data_tensor))
-    num_features_to_show = min(n_features, data_tensor.shape[1])
-    
-    df = pd.DataFrame(data_tensor[:num_samples_to_show, :num_features_to_show].cpu().numpy())
-    df.columns = [f'F{i+1}' for i in range(num_features_to_show)]
-    
-    with pd.option_context('display.max_rows', None, 'display.max_columns', None, 'display.width', 1000):
-        print(f"  (Showing first {num_features_to_show} of {data_tensor.shape[1]} features)")
-        print(df.round(4))
-    print("-" * (len(description) + 30))
+    sample_tensor = data_tensor[:num_samples_to_show]
+    sample_np = sample_tensor.cpu().numpy()
 
+    try:
+        # Use the preprocessor to reverse the scaling and one-hot encoding
+        inversed_data = preprocessor.inverse_transform(sample_np)
+        
+        # Create a pandas DataFrame with the original feature names for nice printing
+        df = pd.DataFrame(inversed_data, columns=original_feature_names)
+
+        with pd.option_context('display.max_rows', None, 'display.max_columns', None, 'display.width', 120):
+            print(df.round(2)) # Round numerical values for cleaner display
+
+    except Exception as e:
+        print(f"  Could not perform inverse transform. Error: {e}")
+        print("  Displaying raw processed data instead (first 15 features):")
+        num_features_to_show = min(15, sample_np.shape[1])
+        df = pd.DataFrame(sample_np[:, :num_features_to_show])
+        df.columns = [f'F{i+1}' for i in range(num_features_to_show)]
+        print(df.round(4))
+
+    print("-" * (len(description) + 40))
 
 def save_results_table(report_dict, timings_data, output_path="results_summary.png", classifier_mode="binary", class_names=None):
     """

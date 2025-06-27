@@ -103,6 +103,7 @@ def load_and_preprocess_nsl_kdd(base_path, train_filename, test_filename, perfor
     X_train_raw, y_train_str = df_train_raw_full.drop(columns=cols_to_drop), df_train_raw_full['attack_type']
     X_test_raw, y_test_str = df_test_raw_full.drop(columns=cols_to_drop), df_test_raw_full['attack_type']
 
+    original_feature_names = X_train_raw.columns.tolist()
     is_binary_mode_data = train_filename.lower().endswith('.arff')
     if is_binary_mode_data:
         print("Applying BINARY label mapping (Normal: 0, Abnormal: 1)")
@@ -147,4 +148,4 @@ def load_and_preprocess_nsl_kdd(base_path, train_filename, test_filename, perfor
     
     return torch.from_numpy(X_train_processed), torch.from_numpy(y_train_final).long().unsqueeze(1), \
            torch.from_numpy(X_test_processed), torch.from_numpy(y_test_final).long().unsqueeze(1), \
-           num_features_processed
+           num_features_processed, preprocessor, original_feature_names

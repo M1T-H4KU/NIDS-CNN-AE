@@ -46,20 +46,24 @@ def main(args):
     start_time_s1 = time.time()
     X_train_original_tensor, y_train_original_labels_tensor, \
     X_test_original_tensor, y_test_original_labels_tensor, \
-    NUM_FEATURES_PREPROCESSED = \
+    NUM_FEATURES_PREPROCESSED, preprocessor, original_feature_names = \
         load_and_preprocess_nsl_kdd(cfg.BASE_DATA_PATH, train_file, test_file, perform_outlier_removal=args.use_outlier_removal)
     duration_s1 = time.time() - start_time_s1
     step_timings['Data Loading & Preprocessing'] = format_time(duration_s1)
     print(f"--- Finished: Data Loading & Preprocessing in {format_time(duration_s1)} ---")
     print("\n--- Verifying Original Preprocessed Data ---")
     # Determine the class names based on the mode data was loaded for
+    print("\n--- Verifying Original Preprocessed Data (Human-Readable) ---")
     is_binary_data = train_file.lower().endswith('.arff')
     class_map_for_display = {0: 'Normal', 1: 'Abnormal'} if is_binary_data else cfg.NSL_KDD_CLASS_NAMES_INT_TO_STR
     
     for class_label, class_name in class_map_for_display.items():
         class_indices = (y_train_original_labels_tensor.squeeze() == class_label)
-        data_for_class = X_train_original_tensor[class_indices]
-        display_data_samples(data_for_class, f"Original '{class_name}' Data (Class {class_label})")
+        # Check if any samples exist for this class before trying to display
+        if torch.any(class_indices):
+            data_for_class = X_train_original_tensor[class_indices]
+            display_data_samples(data_for_class, f"Original '{class_name}' Data (Class {class_label})", 
+                                 preprocessor, original_feature_names)
         
         
     # --- Step 2: Class-wise BEGAN Training and Data Augmentation ---
@@ -123,7 +127,12 @@ def main(args):
             if num_samples_to_generate > 0 and trained_g_class is not None:
                 print(f"  Generating {num_samples_to_generate} synthetic samples for {class_name_str}...")
                 synthetic_class_features_cpu = augment_data_with_gan(trained_g_class, cfg.BEGAN_NOISE_DIM, num_samples_to_generate, cfg.DEVICE, cfg.GAN_BATCH_SIZE)
-                display_data_samples(synthetic_class_features_cpu, f"Generated '{class_name_str}' Data")
+                display_data_samples(
+                     synthetic_class_features_cpu, 
+                     f"Generated '{class_name_str}' Data", 
+                     preprocessor, 
+                     original_feature_names
+                 )
                 if synthetic_class_features_cpu.size(0) > 0:
                     synthetic_class_labels_cpu = torch.full((synthetic_class_features_cpu.size(0), 1), float(class_label), dtype=torch.long)
                     X_train_final_tensor_cpu_list.append(synthetic_class_features_cpu)
