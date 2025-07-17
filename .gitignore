@@ -8,7 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
-.vscode
+.vscode/
+
 # data files
 datasets/
 *.pt
