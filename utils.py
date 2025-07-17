@@ -218,3 +218,58 @@ def save_results_table(report_dict, timings_data, output_path="results_summary.p
     except Exception as e:
         print(f"Error saving results table: {e}")
     plt.close(fig)
+    
+def save_training_graphs(history, model_name_str, output_path="training_graph.png"):
+    """
+    Generates and saves line graphs for training/validation loss and accuracy.
+    
+    Args:
+        history (dict): A dictionary containing lists of metrics per epoch, 
+                        e.g., {'train_loss': [...], 'val_loss': [...], 'train_acc': [...], 'val_acc': [...]}.
+        model_name_str (str): The name of the model for titles (e.g., "CNN Classifier").
+        output_path (str): The path to save the generated image.
+    """
+    has_accuracy = 'train_acc' in history and history['train_acc']
+    
+    # Determine the number of subplots needed
+    num_subplots = 1
+    if has_accuracy:
+        num_subplots = 2
+        
+    fig, axs = plt.subplots(num_subplots, 1, figsize=(8, 5 * num_subplots))
+    # If only one subplot, axs is not a list, so make it one for consistent access
+    if num_subplots == 1:
+        axs = [axs]
+        
+    fig.suptitle(f'{model_name_str} Training History', fontsize=16)
+
+    # --- Plot Loss ---
+    ax_loss = axs[0]
+    ax_loss.plot(history['loss'], label='Training Loss')
+    if 'val_loss' in history and history['val_loss']:
+        ax_loss.plot(history['val_loss'], label='Validation Loss')
+    ax_loss.set_title("Loss over Epochs")
+    ax_loss.set_xlabel("Epoch")
+    ax_loss.set_ylabel("Loss")
+    ax_loss.legend()
+    ax_loss.grid(True)
+
+    # --- Plot Accuracy (if available) ---
+    if has_accuracy:
+        ax_acc = axs[1]
+        ax_acc.plot(history['train_acc'], label='Training Accuracy')
+        if 'val_acc' in history and history['val_acc']:
+            ax_acc.plot(history['val_acc'], label='Validation Accuracy')
+        ax_acc.set_title("Accuracy over Epochs")
+        ax_acc.set_xlabel("Epoch")
+        ax_acc.set_ylabel("Accuracy (%)")
+        ax_acc.legend()
+        ax_acc.grid(True)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to make room for suptitle
+    try:
+        plt.savefig(output_path, dpi=150)
+        print(f"Training graph saved to {output_path}")
+    except Exception as e:
+        print(f"Error saving training graph: {e}")
+    plt.close(fig)
