@@ -20,7 +20,7 @@ EXTRACTED_FEATURES_FILE_GAN_AUGMENTED = "ae_features_gan_augmented.pt"
 # --- General training ---
 DEFAULT_EPOCHS = 300 
 AE_BATCH_SIZE = 64
-CNN_BATCH_SIZE = 64
+CNN_BATCH_SIZE = 512
 
 # --- Early Stopping ---
 EARLY_STOPPING_PATIENCE = 35
@@ -31,7 +31,7 @@ AE_LATENT_DIM = 50
 AE_HIDDEN_DIM_1 = 80
 AE_LEARNING_RATE = 1e-3
 
-# --- CNN Classifier ---
+# --- CNN Classifier (Paper's Architecture) ---
 CNN_FILTERS = 32
 CNN_KERNEL_SIZE = 5
 CNN_POOL_SIZE = 3
@@ -39,6 +39,10 @@ CNN_POOL_STRIDE = 3
 CNN_FC_NEURONS = 16
 CNN_LEARNING_RATE = 1e-3
 CNN_EPOCHS = 300 
+
+# --- DNN Classifier ---
+DNN_HIDDEN_LAYER_1 = 100
+DNN_HIDDEN_LAYER_2 = 50
 
 # --- GAN (BEGAN) Augmentation ---
 BEGAN_NOISE_DIM = 50
@@ -50,13 +54,9 @@ BEGAN_LAMBDA_K = 0.001
 BEGAN_K_T_INITIAL = 0.0
 BEGAN_M_THRESHOLD = 0.058
 GAN_BATCH_SIZE = 64
-
-# Number of synthetic samples for the GENERAL / BINARY case (35k for each class found)
 NUM_SYNTHETIC_SAMPLES_PER_CLASS = 35000
-# Number of synthetic samples FOR EACH MINORITY CLASS in the MULTI-CLASS case
 NUM_SYNTHETIC_SAMPLES_PER_MINORITY_CLASS = 10000
-# For NSL-KDD, the paper explicitly names the minority classes to augment in the multi-class scenario
-NSL_KDD_MINORITY_CLASSES_TO_AUGMENT = [2, 3, 4] # Corresponds to Probe, R2L, U2R
+NSL_KDD_MINORITY_CLASSES_TO_AUGMENT = [2, 3, 4] # Probe, R2L, U2R
 
 # --- Class Definitions ---
 NSL_KDD_CLASS_MAPPING_STR_TO_INT = {
