@@ -5,18 +5,21 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-from scipy.io import arff # For handling ARFF files
-from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
+from scipy.io import arff
+from sklearn.preprocessing import MinMaxScaler
 import configs as cfg
 
 class NSLKDDDataset(Dataset):
+    """
+    Custom PyTorch Dataset for NSL-KDD data.
+    """
     def __init__(self, features, labels=None):
         self.features = features
         self.labels = labels
+
     def __len__(self):
         return len(self.features)
+
     def __getitem__(self, idx):
         x = self.features[idx]
         if self.labels is not None:
@@ -25,42 +28,84 @@ class NSLKDDDataset(Dataset):
         return x
 
 def map_attack_to_multiclass(attack_type_str):
+    """Maps a raw attack string to its integer multi-class label using the config mapping."""
     return cfg.NSL_KDD_CLASS_MAPPING_STR_TO_INT.get(
         attack_type_str, 
         cfg.DEFAULT_ATTACK_LABEL_INT if attack_type_str != 'normal' else 0
     )
 
-def apply_outlier_removal(df, label_series, numerical_col_names, class_map_int_to_str):
+def learn_outlier_thresholds(df, label_series, numerical_col_names, class_map_int_to_str):
+    """
+    Learns MAD-based outlier thresholds ONLY from the provided training data.
+    Returns a dictionary of thresholds.
+    """
+    thresholds = {}
     df_with_labels = df.copy()
     temp_label_col = '~class_label_temp~'
     df_with_labels[temp_label_col] = label_series
-    rows_to_drop_indices = set()
+
     for class_int_label, class_str_name in class_map_int_to_str.items():
+        thresholds[class_int_label] = {}
         class_data_df = df_with_labels[df_with_labels[temp_label_col] == class_int_label]
-        if class_data_df.empty: continue
+        if class_data_df.empty:
+            continue
+        
         for col_name in numerical_col_names:
             feature_data = class_data_df[col_name].astype(float)
-            if feature_data.empty or feature_data.nunique() < 2: continue
+            if feature_data.empty or feature_data.nunique() < 2:
+                continue
+                
             median_val = feature_data.median()
             abs_diff_from_median = np.abs(feature_data - median_val)
             mad = abs_diff_from_median.median()
-            if mad == 0: continue
-            sigma_hat = 1.4826 * mad
-            threshold = 10 * sigma_hat
-            outliers_in_feature = feature_data[abs_diff_from_median > threshold]
-            if not outliers_in_feature.empty:
-                rows_to_drop_indices.update(outliers_in_feature.index)
+            
+            if mad == 0:
+                threshold = np.inf
+            else:
+                sigma_hat = 1.4826 * mad
+                threshold = 10 * sigma_hat
+            
+            thresholds[class_int_label][col_name] = {'median': median_val, 'threshold': threshold}
+            
+    return thresholds
+
+def remove_outliers_with_thresholds(df, label_series, numerical_col_names, thresholds):
+    """
+    Removes outliers from a dataset (train or test) using pre-computed thresholds.
+    """
+    rows_to_drop_indices = set()
+    
+    for index, row in df.iterrows():
+        class_label = label_series.loc[index]
+        if class_label not in thresholds:
+            continue
+            
+        for col_name in numerical_col_names:
+            if col_name not in thresholds[class_label]:
+                continue
+            
+            class_thresholds = thresholds[class_label][col_name]
+            median_val = class_thresholds['median']
+            threshold = class_thresholds['threshold']
+            
+            if np.abs(row[col_name] - median_val) > threshold:
+                rows_to_drop_indices.add(index)
+                break 
     if rows_to_drop_indices:
         print(f"  Total unique rows to drop due to outliers: {len(rows_to_drop_indices)}")
         df_cleaned = df.drop(index=list(rows_to_drop_indices))
         label_series_cleaned = label_series.drop(index=list(rows_to_drop_indices))
         print(f"  Shape after outlier removal: {df_cleaned.shape}")
     else:
-        print("  No outliers found or removed based on MAD criteria.")
+        print("  No outliers found or removed based on the learned thresholds.")
         df_cleaned, label_series_cleaned = df, label_series
+        
     return df_cleaned, label_series_cleaned
 
 def load_and_preprocess_nsl_kdd(base_path, train_filename, test_filename, perform_outlier_removal=False):
+    """
+    Loads and preprocesses NSL-KDD data from either TXT or ARFF files.
+    """
     print(f"Loading NSL-KDD data from {base_path}...")
     print(f"Outlier removal: {'Enabled' if perform_outlier_removal else 'Disabled'}")
     train_path = os.path.join(base_path, train_filename)
@@ -98,12 +143,23 @@ def load_and_preprocess_nsl_kdd(base_path, train_filename, test_filename, perfor
     else:
         raise ValueError(f"Unsupported file format for: {train_filename}")
 
+    # --- Enforce numeric types BEFORE any other processing ---
+    categorical_feature_names = ['protocol_type', 'service', 'flag']
+    feature_cols = [col for col in df_train_raw_full.columns if col not in ['attack_type', 'difficulty_level', 'class']]
+    numerical_col_names = [col for col in feature_cols if col not in categorical_feature_names]
+    print("\nEnforcing numeric types on numerical columns...")
+    for col in numerical_col_names:
+        df_train_raw_full[col] = pd.to_numeric(df_train_raw_full[col], errors='coerce')
+        df_test_raw_full[col] = pd.to_numeric(df_test_raw_full[col], errors='coerce')
+    df_train_raw_full.fillna(0, inplace=True)
+    df_test_raw_full.fillna(0, inplace=True)
+
+    # --- Preprocessing Pipeline ---
     cols_to_drop = ['attack_type']
     if 'difficulty_level' in df_train_raw_full.columns: cols_to_drop.append('difficulty_level')
     X_train_raw, y_train_str = df_train_raw_full.drop(columns=cols_to_drop), df_train_raw_full['attack_type']
     X_test_raw, y_test_str = df_test_raw_full.drop(columns=cols_to_drop), df_test_raw_full['attack_type']
-
-    original_feature_names = X_train_raw.columns.tolist()
+    
     is_binary_mode_data = train_filename.lower().endswith('.arff')
     if is_binary_mode_data:
         print("Applying BINARY label mapping (Normal: 0, Abnormal: 1)")
@@ -113,39 +169,47 @@ def load_and_preprocess_nsl_kdd(base_path, train_filename, test_filename, perfor
         y_train_labels, y_test_labels = y_train_str.apply(map_attack_to_multiclass).values, y_test_str.apply(map_attack_to_multiclass).values
     
     y_train_series, y_test_series = pd.Series(y_train_labels, index=X_train_raw.index), pd.Series(y_test_labels, index=X_test_raw.index)
-    
+    X_train_cleaned, y_train_series_cleaned = X_train_raw, y_train_series
+    X_test_cleaned, y_test_series_cleaned = X_test_raw, y_test_series
+
     if perform_outlier_removal:
-        categorical_feature_names = ['protocol_type', 'service', 'flag']
-        numerical_col_names = [col for col in X_train_raw.columns if col not in categorical_feature_names]
         class_map = cfg.NSL_KDD_CLASS_NAMES_INT_TO_STR if not is_binary_mode_data else {0: 'Normal', 1: 'Abnormal'}
-        print("\nPerforming Outlier Analysis on Training Data...")
-        X_train_cleaned, y_train_series_cleaned = apply_outlier_removal(X_train_raw, y_train_series, numerical_col_names, class_map)
-        print("\nPerforming Outlier Analysis on Test Data...")
-        X_test_cleaned, y_test_series_cleaned = apply_outlier_removal(X_test_raw, y_test_series, numerical_col_names, class_map)
+        print("\nLearning Outlier Thresholds from Training Data ONLY...")
+        outlier_thresholds = learn_outlier_thresholds(X_train_raw, y_train_series, numerical_col_names, class_map)
+        print("\nApplying learned thresholds to remove outliers from Training Data...")
+        X_train_cleaned, y_train_series_cleaned = remove_outliers_with_thresholds(X_train_raw, y_train_series, numerical_col_names, outlier_thresholds)
+        print("\nApplying learned thresholds to remove outliers from Test Data...")
+        X_test_cleaned, y_test_series_cleaned = remove_outliers_with_thresholds(X_test_raw, y_test_series, numerical_col_names, outlier_thresholds)
     else:
         print("\nSkipping Outlier Analysis.")
-        X_train_cleaned, y_train_series_cleaned = X_train_raw, y_train_series
-        X_test_cleaned, y_test_series_cleaned = X_test_raw, y_test_series
 
     y_train_final, y_test_final = y_train_series_cleaned.values, y_test_series_cleaned.values
 
-    categorical_feature_names = ['protocol_type', 'service', 'flag']
-    num_indices_for_ct = [X_train_cleaned.columns.get_loc(col) for col in X_train_cleaned.columns if col not in categorical_feature_names]
-    cat_indices_for_ct = [X_train_cleaned.columns.get_loc(col) for col in categorical_feature_names if col in X_train_cleaned.columns]
+    # Combine features and labels before pd.get_dummies
+    X_train_cleaned['label'] = y_train_final
+    X_test_cleaned['label'] = y_test_final
+    combined_data = pd.concat([X_train_cleaned, X_test_cleaned], ignore_index=True)
+
+    print("\nApplying one-hot encoding using pd.get_dummies()...")
+    combined_data_ohe = pd.get_dummies(combined_data, columns=categorical_feature_names)
+
+    X_train_ohe = combined_data_ohe.iloc[:len(X_train_cleaned)]
+    X_test_ohe = combined_data_ohe.iloc[len(X_train_cleaned):]
     
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', Pipeline([('scaler', MinMaxScaler())]), num_indices_for_ct),
-            ('cat', Pipeline([('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))]), cat_indices_for_ct)
-        ], remainder='passthrough'
-    )
+    y_train_final = X_train_ohe.pop('label').values
+    y_test_final = X_test_ohe.pop('label').values
+
+    feature_names_after_ohe = X_train_ohe.columns.tolist()
+    num_features_processed = len(feature_names_after_ohe)
     
-    X_train_processed = preprocessor.fit_transform(X_train_cleaned).astype(np.float32)
-    X_test_processed = preprocessor.transform(X_test_cleaned).astype(np.float32)
-    num_features_processed = X_train_processed.shape[1]
-    
+    print("Applying MinMaxScaler to all features...")
+    scaler = MinMaxScaler()
+    X_train_processed = scaler.fit_transform(X_train_ohe).astype(np.float32)
+    X_test_processed = scaler.transform(X_test_ohe).astype(np.float32)
+
     print(f"\nData preprocessed. Final number of features: {num_features_processed}")
     
+    # Note: preprocessor object is now None, and feature_names are post-OHE
     return torch.from_numpy(X_train_processed), torch.from_numpy(y_train_final).long().unsqueeze(1), \
            torch.from_numpy(X_test_processed), torch.from_numpy(y_test_final).long().unsqueeze(1), \
-           num_features_processed, preprocessor, original_feature_names
+           num_features_processed, None, feature_names_after_ohe
