@@ -17,27 +17,23 @@ def train_autoencoder(model, dataloader, epochs, learning_rate, device, early_st
 
     for epoch in range(epochs):
         model.train()
-        # MODIFIED: 累加总损失，而不是在循环内累加 .item()
         epoch_loss_sum = 0.0
 
         for batch_features in dataloader:
             if isinstance(batch_features, list) or isinstance(batch_features, tuple):
                 batch_features = batch_features[0]
-            # MODIFIED: 尽快将数据移动到设备
             batch_features = batch_features.to(device)
             optimizer.zero_grad()
             outputs = model(batch_features)
             loss = criterion(outputs, batch_features)
             loss.backward()
             optimizer.step()
-            # MODIFIED: 乘以 batch_features.size(0) 来正确计算总损失
             epoch_loss_sum += loss.item() * batch_features.size(0)
         
         avg_epoch_loss = 0.0
-        # MODIFIED: 确保 dataloader.dataset 存在且不为空
         if hasattr(dataloader, 'dataset') and len(dataloader.dataset) > 0:
             avg_epoch_loss = epoch_loss_sum / len(dataloader.dataset)
-        elif len(dataloader) > 0: # 回退到按 batch 数量计算
+        elif len(dataloader) > 0: 
              avg_epoch_loss = epoch_loss_sum / len(dataloader)
 
         history['loss'].append(avg_epoch_loss)
@@ -118,15 +114,86 @@ def train_began_for_class(
     print(f"BEGAN training for class '{class_name}' finished.")
     return generator
 
+def train_cgan(generator, discriminator, dataloader, noise_dim, epochs, device, lr, beta1, beta2):
+    """
+    Trains a Conditional GAN (cGAN) on the provided dataset with labels.
+    """
+    generator.to(device)
+    discriminator.to(device)
+    
+    # Binary Cross Entropy Loss (with logits for stability)
+    criterion = nn.BCEWithLogitsLoss()
+    
+    optimizer_g = optim.Adam(generator.parameters(), lr=lr, betas=(beta1, beta2))
+    optimizer_d = optim.Adam(discriminator.parameters(), lr=lr, betas=(beta1, beta2))
+    
+    print(f"\n--- Training cGAN on {device} for {epochs} epochs ---")
+    
+    for epoch in range(epochs):
+        generator.train()
+        discriminator.train()
+        
+        loss_d_sum = 0.0
+        loss_g_sum = 0.0
+        num_batches = 0
+        
+        for real_features, real_labels in dataloader:
+            real_features = real_features.to(device)
+            real_labels = real_labels.to(device).long().squeeze()
+            batch_size = real_features.size(0)
+            
+            # --- Train Discriminator ---
+            optimizer_d.zero_grad()
+            
+            # Real Data
+            valid_targets = torch.ones(batch_size, 1, device=device)
+            pred_real = discriminator(real_features, real_labels)
+            loss_real = criterion(pred_real, valid_targets)
+            
+            # Fake Data
+            noise = torch.randn(batch_size, noise_dim, device=device)
+            # We use the same labels as real data to condition the generator
+            fake_features = generator(noise, real_labels)
+            fake_targets = torch.zeros(batch_size, 1, device=device)
+            pred_fake = discriminator(fake_features.detach(), real_labels)
+            loss_fake = criterion(pred_fake, fake_targets)
+            
+            loss_d = (loss_real + loss_fake) / 2
+            loss_d.backward()
+            optimizer_d.step()
+            
+            # --- Train Generator ---
+            optimizer_g.zero_grad()
+            
+            # Generator wants discriminator to predict 'valid' (1)
+            pred_fake_for_g = discriminator(fake_features, real_labels)
+            loss_g = criterion(pred_fake_for_g, valid_targets)
+            
+            loss_g.backward()
+            optimizer_g.step()
+            
+            loss_d_sum += loss_d.item()
+            loss_g_sum += loss_g.item()
+            num_batches += 1
+            
+        if num_batches > 0:
+            avg_loss_d = loss_d_sum / num_batches
+            avg_loss_g = loss_g_sum / num_batches
+            
+            if (epoch + 1) % 10 == 0 or epoch == 0 or epoch == epochs - 1:
+                print(f"  cGAN Epoch [{epoch+1}/{epochs}]: Loss D: {avg_loss_d:.4f}, Loss G: {avg_loss_g:.4f}")
+                
+    print("cGAN training finished.")
+    return generator
+
 def augment_data_with_gan(generator, noise_dim, num_samples, device, gan_batch_size):
     generator.eval()
     generated_data_list = []
     if num_samples == 0:
-        # 确保输出维度正确
         out_features = generator.main[-2].out_features if hasattr(generator, 'main') and len(generator.main) > 2 else 0
         if out_features == 0: 
             print("Warning: Could not determine generator output features for empty tensor.")
-            return torch.empty(0, 1, device='cpu') # 提供一个回退
+            return torch.empty(0, 1, device='cpu')
         return torch.empty(0, out_features, device='cpu')
 
     with torch.no_grad():
@@ -144,13 +211,45 @@ def augment_data_with_gan(generator, noise_dim, num_samples, device, gan_batch_s
     generated_data = torch.cat(generated_data_list, dim=0)
     return generated_data[:num_samples]
 
+def augment_data_with_cgan(generator, noise_dim, num_samples, target_label_int, device, gan_batch_size):
+    """
+    Generates synthetic data for a specific class using a trained Conditional Generator.
+    """
+    generator.eval()
+    generated_data_list = []
+    
+    if num_samples == 0:
+        return torch.empty(0, 1, device='cpu') # Placeholder return size might need adjustment
+
+    with torch.no_grad():
+        for _ in range(int(np.ceil(num_samples / gan_batch_size))):
+            current_batch_gen_size = min(gan_batch_size, num_samples - len(generated_data_list))
+            if current_batch_gen_size <= 0: break
+            
+            noise = torch.randn(current_batch_gen_size, noise_dim, device=device)
+            labels = torch.full((current_batch_gen_size,), target_label_int, dtype=torch.long, device=device)
+            
+            synthetic_samples = generator(noise, labels).cpu()
+            generated_data_list.append(synthetic_samples)
+            
+    if not generated_data_list:
+        # Try to infer output dim from model structure (assuming Linear layer last before sigmoid)
+        # cGAN model structure: model -> Sequential -> Linear ...
+        try:
+            out_features = generator.model[-2].out_features
+        except:
+            out_features = 1
+        return torch.empty(0, out_features, device='cpu')
+
+    generated_data = torch.cat(generated_data_list, dim=0)
+    return generated_data[:num_samples]
+
 def extract_ae_features(encoder_model, dataloader, device, batch_size):
     encoder_model.to(device)
     encoder_model.eval()
     all_features_list = []
-    # MODIFIED: 确保我们使用的是传入的 dataloader，而不是重新创建一个
-    # (您在 main.py 中已经正确配置了 batch_size，所以这里的 batch_size 参数是多余的，但我们会保留它)
-    temp_dataloader = dataloader # 使用已配置好的 dataloader
+    # MODIFIED: 确保我们使用的是传入的 dataloader
+    temp_dataloader = dataloader 
 
     with torch.no_grad():
         for batch_data in temp_dataloader:
@@ -161,7 +260,6 @@ def extract_ae_features(encoder_model, dataloader, device, batch_size):
             all_features_list.append(encoded_features.cpu())
     if not all_features_list:
         print("Warning: No data processed during feature extraction.")
-        # MODIFIED: 尝试从模型获取输出维度
         try:
             out_dim = encoder_model.encoder[-2].out_features
         except:
@@ -175,7 +273,6 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
     model.to(device)
     
     if num_classes == 1:
-        # MODIFIED: 确保 criterion 也在正确的设备上 (如果它有状态)
         criterion = nn.BCEWithLogitsLoss().to(device)
     else: # Multi-class
         criterion = nn.CrossEntropyLoss(weight=class_weights).to(device)
@@ -193,7 +290,6 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
     for epoch in range(epochs):
         model.train()
         train_loss_sum = 0
-        # MODIFIED: 这些列表现在收集 *Tensors*，而不是 numpy 数组
         all_train_preds_list, all_train_labels_list = [], []
 
         for batch_features, batch_labels in train_loader:
@@ -201,7 +297,6 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
             optimizer.zero_grad()
             outputs = model(batch_features)
             
-            # MODIFIED: 确保标签类型匹配 (特别是对于 CrossEntropy)
             if num_classes > 1:
                 batch_labels = batch_labels.long()
             
@@ -215,7 +310,6 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
             else:
                 _, predicted = torch.max(outputs.data, 1)
             
-            # MODIFIED: 移除 .cpu().numpy()。只追加张量，这是一个快速的非阻塞操作。
             all_train_preds_list.append(predicted.view(-1))
             all_train_labels_list.append(batch_labels.view(-1))
             
@@ -223,9 +317,7 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
         if hasattr(train_loader, 'dataset') and len(train_loader.dataset) > 0:
             avg_train_loss = train_loss_sum / len(train_loader.dataset)
 
-        
         train_accuracy_epoch = 0.0
-        # MODIFIED: 在 *循环外* 进行一次性的 tensor 合并、CPU 转移和 numpy 转换
         if all_train_labels_list:
             try:
                 all_train_preds_np = torch.cat(all_train_preds_list).cpu().numpy()
@@ -234,10 +326,8 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
             except Exception as e:
                 print(f"Warning: Could not calculate train accuracy. {e}")
 
-        
         model.eval()
         val_loss_sum = 0
-        # MODIFIED: 验证循环也一样，收集 Tensors
         all_val_preds_list, all_val_labels_list = [], []
         with torch.no_grad():
             for batch_features, batch_labels in val_loader:
@@ -255,7 +345,6 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
                 else:
                     _, predicted_val = torch.max(outputs.data, 1)
                 
-                # MODIFIED: 移除 .cpu().numpy()
                 all_val_preds_list.append(predicted_val.view(-1))
                 all_val_labels_list.append(batch_labels.view(-1))
 
@@ -267,7 +356,6 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
         val_accuracy = 0.0
         all_val_preds_np, all_val_labels_np = None, None
         
-        # MODIFIED: 在 *循环外* 进行一次性的 tensor 合并、CPU 转移和 numpy 转换
         if all_val_labels_list:
             try:
                 all_val_preds_np = torch.cat(all_val_preds_list).cpu().numpy()
@@ -284,7 +372,6 @@ def train_classifier(model, train_loader, val_loader, epochs, learning_rate, dev
             except Exception as e:
                  print(f"Warning: Could not calculate validation metrics. {e}")
 
-        
         history['loss'].append(avg_train_loss)
         history['train_acc'].append(train_accuracy_epoch)
         history['val_loss'].append(avg_val_loss)

@@ -11,7 +11,7 @@ def main(args):
     """
     
     # --- Step 0: Imports and Initial Setup ---
-    print(f"--- Starting Run ID: {args.run_id} ---") # <-- 2. 打印当前运行 ID
+    print(f"--- Starting Run ID: {args.run_id} ---") 
     
     import torch
     from torch.utils.data import DataLoader
@@ -23,15 +23,15 @@ def main(args):
     import configs as cfg
     from utils import ValidationLossEarlyStopper, TrainingLossEarlyStopper, format_time, save_training_graphs, save_confusion_matrix
     from data_loader import NSLKDDDataset, load_and_preprocess_nsl_kdd
-    from models import Autoencoder, Generator, CNNClassifier, DNNClassifier
+    from models import Autoencoder, Generator, CNNClassifier, DNNClassifier, ConditionalGenerator, ConditionalDiscriminator
     from training_logic import (
-        train_autoencoder, train_began_for_class, train_classifier,
-        extract_ae_features, augment_data_with_gan
+        train_autoencoder, train_began_for_class, train_cgan, train_classifier,
+        extract_ae_features, augment_data_with_gan, augment_data_with_cgan
     )
-    
     
     print(f"Using device: {cfg.DEVICE}")
     print(f"Running with arguments: GAN Augmentation={'Enabled' if args.use_gan else 'Disabled'}, "
+          f"GAN Type='{args.gan_type if args.use_gan else 'N/A'}', "
           f"Outlier Removal={'Enabled' if args.use_outlier_removal else 'Disabled'}, "
           f"Classifier Mode='{args.classifier_mode}', Model Pipeline='{args.model}'")
     step_timings = {}
@@ -56,12 +56,13 @@ def main(args):
     step_timings['Data Loading & Preprocessing'] = format_time(duration_s1)
     print(f"--- Finished: Data Loading & Preprocessing in {format_time(duration_s1)} ---")
 
-    # --- Step 2: Class-wise BEGAN Training and Data Augmentation ---
+    # --- Step 2: Data Augmentation (BEGAN or cGAN) ---
     X_train_final_tensor = X_train_original_tensor
     y_train_final_labels_tensor = y_train_original_labels_tensor
+    
     if args.use_gan:
-        print("\n--- Starting: BEGAN Data Augmentation ---")
-        began_total_start_time = time.time()
+        print(f"\n--- Starting: {args.gan_type.upper()} Data Augmentation ---")
+        gan_total_start_time = time.time()
         
         X_train_final_tensor_cpu_list = [X_train_original_tensor.cpu()]
         y_train_final_labels_cpu_list = [y_train_original_labels_tensor.cpu()]
@@ -81,47 +82,90 @@ def main(args):
         
         existing_classes_in_data = torch.unique(y_train_original_labels_tensor.squeeze().cpu()).numpy()
 
-        for class_label in classes_to_augment:
-            if int(class_label) not in existing_classes_in_data:
-                print(f"\nSkipping BEGAN for Class_{int(class_label)}: Not present in the loaded training data.")
-                continue
+        # === BEGAN Branch ===
+        if args.gan_type == 'began':
+            for class_label in classes_to_augment:
+                if int(class_label) not in existing_classes_in_data:
+                    print(f"\nSkipping BEGAN for Class_{int(class_label)}: Not present in the loaded training data.")
+                    continue
 
-            class_name_str = f"Class_{int(class_label)} ({class_name_map.get(int(class_label), 'Unknown')})"
-            print(f"\nProcessing BEGAN for {class_name_str}")
+                class_name_str = f"Class_{int(class_label)} ({class_name_map.get(int(class_label), 'Unknown')})"
+                print(f"\nProcessing BEGAN for {class_name_str}")
 
-            class_indices = (y_train_original_labels_tensor.squeeze().cpu() == class_label)
-            X_class_data_cpu = X_train_original_tensor.cpu()[class_indices]
+                class_indices = (y_train_original_labels_tensor.squeeze().cpu() == class_label)
+                X_class_data_cpu = X_train_original_tensor.cpu()[class_indices]
 
-            effective_batch_size = min(len(X_class_data_cpu), cfg.GAN_BATCH_SIZE)
-            if effective_batch_size == 0: continue
+                effective_batch_size = min(len(X_class_data_cpu), cfg.GAN_BATCH_SIZE)
+                if effective_batch_size == 0: continue
 
-            class_dataset = NSLKDDDataset(X_class_data_cpu)
-            class_dataloader = DataLoader(
-                class_dataset, batch_size=effective_batch_size, shuffle=True, drop_last=False, 
-                num_workers=4, pin_memory=True
+                class_dataset = NSLKDDDataset(X_class_data_cpu)
+                class_dataloader = DataLoader(
+                    class_dataset, batch_size=effective_batch_size, shuffle=True, drop_last=False, 
+                    num_workers=4, pin_memory=True
+                )
+                
+                if len(class_dataloader) == 0: continue
+
+                g_began_class = Generator(cfg.BEGAN_NOISE_DIM, cfg.BEGAN_GENERATOR_HIDDEN_DIM, NUM_FEATURES_PREPROCESSED)
+                d_began_class_ae = Autoencoder(NUM_FEATURES_PREPROCESSED, cfg.AE_LATENT_DIM, cfg.AE_HIDDEN_DIM_1)
+                
+                trained_g_class = train_began_for_class(
+                    g_began_class, d_began_class_ae, class_dataloader, 
+                    cfg.BEGAN_NOISE_DIM, cfg.BEGAN_MAX_EPOCHS_PER_CLASS, cfg.DEVICE, 
+                    class_name_str, cfg.BEGAN_GAMMA, cfg.BEGAN_LAMBDA_K, 
+                    cfg.BEGAN_K_T_INITIAL, cfg.BEGAN_M_THRESHOLD, cfg.BEGAN_LR
+                )
+                
+                if num_samples_to_generate > 0 and trained_g_class is not None:
+                     print(f"  Generating {num_samples_to_generate} synthetic samples for {class_name_str}...")
+                     synthetic_class_features_cpu = augment_data_with_gan(trained_g_class, cfg.BEGAN_NOISE_DIM, num_samples_to_generate, cfg.DEVICE, cfg.GAN_BATCH_SIZE)
+                     if synthetic_class_features_cpu.size(0) > 0:
+                         synthetic_class_labels_cpu = torch.full((synthetic_class_features_cpu.size(0), 1), float(class_label), dtype=torch.long)
+                         X_train_final_tensor_cpu_list.append(synthetic_class_features_cpu)
+                         y_train_final_labels_cpu_list.append(synthetic_class_labels_cpu)
+
+        # === cGAN Branch ===
+        elif args.gan_type == 'cgan':
+            print(f"\nTraining Conditional GAN (cGAN) on ALL classes: {existing_classes_in_data}...")
+            
+            # Create full dataset for cGAN training
+            cgan_dataset = NSLKDDDataset(X_train_original_tensor, y_train_original_labels_tensor)
+            cgan_dataloader = DataLoader(
+                cgan_dataset, batch_size=cfg.GAN_BATCH_SIZE, shuffle=True,
+                num_workers=4, pin_memory=True, drop_last=True
             )
             
-            if len(class_dataloader) == 0: continue
+            num_classes_total = int(max(existing_classes_in_data)) + 1
+            g_cgan = ConditionalGenerator(cfg.CGAN_NOISE_DIM, num_classes_total, cfg.CGAN_LABEL_EMBEDDING_DIM, cfg.CGAN_GENERATOR_HIDDEN_DIM, NUM_FEATURES_PREPROCESSED)
+            d_cgan = ConditionalDiscriminator(NUM_FEATURES_PREPROCESSED, num_classes_total, cfg.CGAN_LABEL_EMBEDDING_DIM, cfg.CGAN_DISCRIMINATOR_HIDDEN_DIM)
+            
+            trained_g_cgan = train_cgan(
+                g_cgan, d_cgan, cgan_dataloader, cfg.CGAN_NOISE_DIM, 
+                cfg.CGAN_EPOCHS, cfg.DEVICE, cfg.CGAN_LR, cfg.CGAN_BETA1, cfg.CGAN_BETA2
+            )
+            
+            # Generate samples for target classes
+            for class_label in classes_to_augment:
+                class_name_str = f"Class_{int(class_label)} ({class_name_map.get(int(class_label), 'Unknown')})"
+                
+                if num_samples_to_generate > 0:
+                    print(f"  Generating {num_samples_to_generate} synthetic samples for {class_name_str} using cGAN...")
+                    synthetic_class_features_cpu = augment_data_with_cgan(
+                        trained_g_cgan, cfg.CGAN_NOISE_DIM, num_samples_to_generate, 
+                        int(class_label), cfg.DEVICE, cfg.GAN_BATCH_SIZE
+                    )
+                    
+                    if synthetic_class_features_cpu.size(0) > 0:
+                        synthetic_class_labels_cpu = torch.full((synthetic_class_features_cpu.size(0), 1), float(class_label), dtype=torch.long)
+                        X_train_final_tensor_cpu_list.append(synthetic_class_features_cpu)
+                        y_train_final_labels_cpu_list.append(synthetic_class_labels_cpu)
 
-            g_began_class = Generator(cfg.BEGAN_NOISE_DIM, cfg.BEGAN_GENERATOR_HIDDEN_DIM, NUM_FEATURES_PREPROCESSED)
-            d_began_class_ae = Autoencoder(NUM_FEATURES_PREPROCESSED, cfg.AE_LATENT_DIM, cfg.AE_HIDDEN_DIM_1)
-            
-            trained_g_class = train_began_for_class(g_began_class, d_began_class_ae, class_dataloader, cfg.BEGAN_NOISE_DIM, cfg.BEGAN_MAX_EPOCHS_PER_CLASS, cfg.DEVICE, class_name_str, cfg.BEGAN_GAMMA, cfg.BEGAN_LAMBDA_K, cfg.BEGAN_K_T_INITIAL, cfg.BEGAN_M_THRESHOLD, cfg.BEGAN_LR)
-            
-            if num_samples_to_generate > 0 and trained_g_class is not None:
-                 print(f"  Generating {num_samples_to_generate} synthetic samples for {class_name_str}...")
-                 synthetic_class_features_cpu = augment_data_with_gan(trained_g_class, cfg.BEGAN_NOISE_DIM, num_samples_to_generate, cfg.DEVICE, cfg.GAN_BATCH_SIZE)
-                 if synthetic_class_features_cpu.size(0) > 0:
-                     synthetic_class_labels_cpu = torch.full((synthetic_class_features_cpu.size(0), 1), float(class_label), dtype=torch.long)
-                     X_train_final_tensor_cpu_list.append(synthetic_class_features_cpu)
-                     y_train_final_labels_cpu_list.append(synthetic_class_labels_cpu)
-        
-        step_timings['BEGAN Augmentation'] = format_time(time.time() - began_total_start_time)
+        step_timings['GAN Augmentation'] = format_time(time.time() - gan_total_start_time)
         X_train_final_tensor = torch.cat(X_train_final_tensor_cpu_list, dim=0)
         y_train_final_labels_tensor = torch.cat(y_train_final_labels_cpu_list, dim=0)
     else:
-        print("\n--- Skipping BEGAN-based Data Augmentation ---")
-        step_timings['BEGAN Augmentation'] = "Skipped"
+        print("\n--- Skipping Data Augmentation ---")
+        step_timings['GAN Augmentation'] = "Skipped"
 
     shuffle_indices = torch.randperm(X_train_final_tensor.size(0))
     X_train_final_tensor, y_train_final_labels_tensor = X_train_final_tensor[shuffle_indices], y_train_final_labels_tensor[shuffle_indices]
@@ -141,6 +185,9 @@ def main(args):
     if 'ae' in args.model:
         print(f"\n--- Model Pipeline: {args.model.upper()} (Autoencoder for Feature Extraction) ---")
         current_extracted_features_file = cfg.EXTRACTED_FEATURES_FILE_GAN_AUGMENTED if args.use_gan else cfg.EXTRACTED_FEATURES_FILE_ORIGINAL
+        if args.use_gan:
+            # Append gan type to filename to avoid conflict
+            current_extracted_features_file = current_extracted_features_file.replace(".pt", f"_{args.gan_type}.pt")
         
         X_train_features_ae, X_test_features_ae = None, None
         if os.path.exists(current_extracted_features_file):
@@ -148,6 +195,8 @@ def main(args):
             start_time_s3load = time.time()
             try:
                 loaded_data = torch.load(current_extracted_features_file, map_location=cfg.DEVICE)
+                # Simple check for data consistency might need to be looser if random seeds change, usually OK if shapes match.
+                # Here we just check length roughly.
                 if loaded_data['train_features'].shape[0] != len(X_train_final_tensor):
                     raise ValueError(f"Stale cache. Expected {len(X_train_final_tensor)} samples, but cache has {loaded_data['train_features'].shape[0]}.")
                 
@@ -221,7 +270,6 @@ def main(args):
         torch.from_numpy(X_val_split).clone(), 
         torch.from_numpy(y_val_split).clone()
     )
-    # MODIFIED: .cpu() 确保数据在CPU上，.clone() 确保它是副本
     test_dataset = NSLKDDDataset(
         X_test_for_cnn.cpu().clone(), 
         y_test_for_cnn_tensor.cpu().clone()
@@ -257,7 +305,6 @@ def main(args):
             num_classes=num_classes_for_cnn
         )
     elif model_type == 'dnn':
-        # <<< MODIFIED: Pass DNN parameters from config file during instantiation >>>
         classifier_model = DNNClassifier(
             input_dim=input_dim_for_cnn,
             hidden_layer_1=cfg.DNN_HIDDEN_LAYER_1,
@@ -318,44 +365,12 @@ def main(args):
         )
     step_timings['Final CNN Evaluation'] = format_time(time.time() - start_time_s5)
     
-    # print("\n--- Final Test Performance Report (Percentage Format) ---")
-    # if 'accuracy' in final_report_dict: print(f"Overall Accuracy: {final_report_dict['accuracy']*100:.2f}%")
-    # else: print("Overall Accuracy: N/A")
-    # print("-" * 70)
-    # for class_name_key in target_names_for_report:
-    #     if class_name_key in final_report_dict:
-    #         metrics = final_report_dict[class_name_key]
-    #         print(f"Class: {class_name_key}")
-    #         print(f"  Recall:    {metrics.get('recall',0)*100:.2f}% | Precision: {metrics.get('precision',0)*100:.2f}% | "
-    #               f"F1-Score: {metrics.get('f1-score',0)*100:.2f}% | Support: {metrics.get('support',0)}")
-    #         print("-" * 40)
-    # for avg_type in ['macro avg', 'weighted avg']:
-    #     if avg_type in final_report_dict:
-    #         metrics = final_report_dict[avg_type]
-    #         print(f"{avg_type.replace('avg', 'Average').title()}:")
-    #         print(f"  Recall:    {metrics.get('recall',0)*100:.2f}% | Precision: {metrics.get('precision',0)*100:.2f}% | "
-    #               f"F1-Score: {metrics.get('f1-score',0)*100:.2f}%")
-    #         if 'support' in metrics: print(f"  Support: {metrics.get('support',0)}")
-    #         print("-" * 40)
-            
-    # cm_output_file = f"{base_filename}_confusion_matrix.png"
-    # if all_final_labels_list:
-    #     save_confusion_matrix(all_final_labels_list, all_final_preds_list, 
-    #                           class_names=target_names_for_report, 
-    #                           output_path=cm_output_file)
-    
-    # print("\nProcess finished.")
-    # print("\n--- Summary of Step Timings ---")
-    # for step, time_taken in step_timings.items():
-    #     print(f"Time for {step}: {time_taken}")
-    
     final_output = {
         'run_id': args.run_id,
         'metrics': final_report_dict,
-        'timings_seconds': {key: (time.time() - start_time_s1) if 'Training' in key else 0 for key, val in step_timings.items()} # 简单记录总时间
+        'timings_seconds': {key: (time.time() - start_time_s1) if 'Training' in key else 0 for key, val in step_timings.items()} 
     }
     
-    # --- 4. 新增: 将结果保存到 JSON 文件 ---
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
         json_filename = os.path.join(args.output_dir, f"run_{args.run_id:03d}.json")
@@ -365,13 +380,12 @@ def main(args):
         except Exception as e:
             print(f"Error saving results for run {args.run_id}: {e}")
     else:
-        # 如果没有提供 output_dir，就只打印一个最小的摘要
         print(f"Run {args.run_id} complete. Accuracy: {final_report_dict.get('accuracy', 0):.4f}")
 
 # --- Main entry point with command-line argument parsing ---
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="NSL-KDD Intrusion Detection with PyTorch, AE, CNN, and optional BEGAN augmentation.",
+        description="NSL-KDD Intrusion Detection with PyTorch, AE, CNN, and optional BEGAN/cGAN augmentation.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     if len(sys.argv) == 1:
@@ -380,7 +394,8 @@ if __name__ == '__main__':
     parser.add_argument('--run_id', type=int, default=0, help="The ID for this specific run.")
     parser.add_argument('--output_dir', type=str, default=None, help="Directory to save the JSON result file.")
     parser.add_argument('--use_outlier_removal', action='store_true', help="Enable MAD-based outlier removal.\n(Default: Disabled).")
-    parser.add_argument('--use_gan', action='store_true', help="Enable BEGAN for data augmentation.\n(Default: Disabled).")
+    parser.add_argument('--use_gan', action='store_true', help="Enable GAN for data augmentation.\n(Default: Disabled).")
+    parser.add_argument('--gan_type', type=str, default='began', choices=['began', 'cgan'], help="Type of GAN to use if --use_gan is set.\n(Default: 'began').")
     parser.add_argument('--classifier_mode', type=str, required=True, choices=['binary', 'multiclass'], help="Set the classifier mode (REQUIRED).")
     parser.add_argument(
         '--model', type=str, required=True,

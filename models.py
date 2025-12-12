@@ -48,6 +48,56 @@ class Generator(nn.Module): # For BEGAN
     def forward(self, noise):
         return self.main(noise)
 
+class ConditionalGenerator(nn.Module): # For cGAN
+    def __init__(self, noise_dim, num_classes, label_emb_dim, hidden_dim, output_dim):
+        super(ConditionalGenerator, self).__init__()
+        self.label_embedding = nn.Embedding(num_classes, label_emb_dim)
+        
+        self.model = nn.Sequential(
+            nn.Linear(noise_dim + label_emb_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(True),
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.BatchNorm1d(hidden_dim * 2),
+            nn.ReLU(True),
+            nn.Linear(hidden_dim * 2, output_dim),
+            nn.Sigmoid() # Assuming normalized features [0, 1]
+        )
+
+    def forward(self, noise, labels):
+        # noise: (batch_size, noise_dim)
+        # labels: (batch_size,) or (batch_size, 1)
+        c = self.label_embedding(labels).squeeze() # (batch, emb_dim)
+        if c.dim() == 1: c = c.unsqueeze(0) # handle batch_size=1
+        
+        x = torch.cat([noise, c], dim=1)
+        out = self.model(x)
+        return out
+
+class ConditionalDiscriminator(nn.Module): # For cGAN
+    def __init__(self, input_dim, num_classes, label_emb_dim, hidden_dim):
+        super(ConditionalDiscriminator, self).__init__()
+        self.label_embedding = nn.Embedding(num_classes, label_emb_dim)
+        
+        self.model = nn.Sequential(
+            nn.Linear(input_dim + label_emb_dim, hidden_dim * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, 1),
+            # No Sigmoid here if using BCEWithLogitsLoss
+        )
+
+    def forward(self, features, labels):
+        c = self.label_embedding(labels).squeeze()
+        if c.dim() == 1: c = c.unsqueeze(0)
+        
+        x = torch.cat([features, c], dim=1)
+        out = self.model(x)
+        return out
+
 class CNNClassifier(nn.Module):
     def __init__(self, input_dim_cnn, cnn_filters, cnn_kernel_size, 
                  cnn_pool_size, cnn_pool_stride, cnn_fc_neurons, num_classes=1):
